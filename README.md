@@ -35,24 +35,21 @@ Open Storyboard Canvas 是一款基于节点画布的桌面创作工具，用于
 
 ## 截图与演示
 
-当前可用的演示素材统一放在 `docs/imgs/readme/`。下面三段 GIF 覆盖提示词库、提示词管理和全景查看核心流程。
+下面的演示素材来自当前版本，统一放在 `docs/imgs/readme/`。
 
 | 场景 | 预览 |
 | --- | --- |
-| 提示词库：预览、收藏、查看详情并应用到画布 | <img src="docs/imgs/readme/prompt-library.gif" alt="Prompt library preview, favorite, detail, and apply workflow" width="520" /> |
-| 提示词管理：管理与修改常用提示词 | <img src="docs/imgs/readme/prompt-management.gif" alt="Prompt management workflow" width="520" /> |
-| 全景查看器：浏览全景、保存当前视角并生成四宫格 | <img src="docs/imgs/readme/panorama-viewer.gif" alt="Panorama viewer workflow" width="520" /> |
-
-静态截图会继续补齐：
-
-- 添加供应商
-- 提示词预设
-- AI 图片节点
-- 摄像机控制
-- 导演台
-- 图片节点功能栏
-- 导演台全景导入
-- Dreamina / 即梦
+| 提示词库：浏览社区提示词，预览详情、收藏灵感并应用到画布项目 | <img src="docs/imgs/readme/prompt-library.gif" alt="提示词库预览、收藏、查看详情并应用到画布" width="520" /> |
+| 添加供应商：复制教程提示词给 AI，让 AI 根据 API 文档输出可导入 JSON，再回到设置页填写和保存 | <img src="docs/imgs/readme/provider-settings.png" alt="添加供应商设置页" width="520" /> |
+| 提示词管理：集中查看内置功能提示词，切换默认语言，修改并恢复默认内容 | <img src="docs/imgs/readme/prompt-management.gif" alt="提示词管理工作流" width="520" /> |
+| 提示词预设：保存常用正向提示词，后续在画布节点和图片功能栏里复用 | <img src="docs/imgs/readme/prompt-presets.png" alt="提示词预设设置页" width="520" /> |
+| AI 图片节点：在同一个节点里选择供应商、模型、参数、摄像机控制、张数和预设提示词，配合参考图继续生成 | <img src="docs/imgs/readme/ai-image-node.png" alt="AI 图片节点" width="520" /> |
+| 摄像机控制：为生成请求补充相机、镜头、焦距和光圈描述，让画面更接近分镜意图 | <img src="docs/imgs/readme/camera-control.png" alt="摄像机控制面板" width="520" /> |
+| 导演台：在 3D 网格或全景环境里摆放人物、路人、道具和场景元素，调位置、关联参考图、编辑备注、控制相机灯光画幅，并把截图回流到画布 | <img src="docs/imgs/readme/director-studio.png" alt="导演台 3D 工作台" width="520" /> |
+| 图片节点功能栏：对已有图片快速执行多角度、打光、多功能、编辑、宫格切分、预设、复制、下载、预览和删除 | <img src="docs/imgs/readme/image-node-toolbar.png" alt="图片节点上方功能栏" width="520" /> |
+| 全景查看器：浏览全景图，保存当前画面，生成四宫格参考图 | <img src="docs/imgs/readme/panorama-viewer.gif" alt="全景查看器工作流" width="520" /> |
+| 导演台全景导入：把已生成或上传的全景图作为导演台空间背景，在全景里继续安排人物与镜头 | <img src="docs/imgs/readme/director-panorama-import.png" alt="导演台导入全景图" width="520" /> |
+| Dreamina / 即梦：可选接入本地 `dreamina` CLI，登录后使用本地 CLI 能力辅助生图 | <img src="docs/imgs/readme/dreamina-cli.png" alt="Dreamina 即梦 CLI 设置页" width="520" /> |
 
 ## 安装下载
 
@@ -181,7 +178,6 @@ cd src-tauri && cargo check
 
 ## 路线图 / 待办
 
-- 补齐首屏、画布、导演台、全景和提示词库的最新截图与短演示。
 - 完善 Release 流程、安装包签名/公证说明和版本变更记录。
 - 持续整理供应商配置文档，减少用户接入自定义模型时的试错成本。
 - 增加更稳定的示例项目与新手教程。

@@ -61,19 +61,16 @@ desktop-app
 
 ## README 媒体建议
 
-当前 README 已接入以下演示 GIF：
+当前 README 已接入以下演示素材：
 
 - `prompt-library.gif`：提示词库预览、收藏、详情和应用。
+- `provider-settings.png`：添加供应商与 AI 辅助 JSON 导入。
 - `prompt-management.gif`：提示词管理与修改。
-- `panorama-viewer.gif`：全景查看、保存当前视角和四宫格生成。
-
-建议首发后继续补齐以下静态截图到 `docs/imgs/readme/`：
-
-- `home.png` 或 `home.webp`：画布项目/提示词库入口。
-- `canvas-ai-node.png`：AI 图片节点、参考图和派生结果。
-- `director-studio.png`：导演台 3D 工作台。
-- `panorama-import.png`：导演台全景导入。
-- `provider-settings.png`：添加供应商。
+- `prompt-presets.png`：提示词预设。
+- `ai-image-node.png`：AI 图片节点、参数和预设。
 - `camera-control.png`：摄像机控制。
-- `node-toolbar.png`：图片节点功能栏。
-- `dreamina.png`：Dreamina / 即梦配置或调用入口。
+- `director-studio.png`：导演台 3D 工作台。
+- `image-node-toolbar.png`：图片节点功能栏。
+- `panorama-viewer.gif`：全景查看、保存当前视角和四宫格生成。
+- `director-panorama-import.png`：导演台导入全景图。
+- `dreamina-cli.png`：Dreamina / 即梦 CLI 设置页。
