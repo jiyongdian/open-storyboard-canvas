@@ -40,7 +40,7 @@ function greatestCommonDivisor(a: number, b: number): number {
 
 const DEFAULT_PREVIEW_MAX_DIMENSION = 512;
 const LOCAL_PATH_PREFIX_PATTERN = /^(?:[A-Za-z]:[\\/]|\\\\|\/)/;
-const BASE64_IMAGE_PAYLOAD_PATTERN = /^[A-Za-z0-9+/=\r\n]+$/;
+const BASE64_IMAGE_PAYLOAD_PATTERN = /^[A-Za-z0-9+/_=\r\n\s-]+$/;
 
 export interface PreparedNodeImage {
   imageUrl: string;
@@ -99,6 +99,12 @@ function looksLikeBase64ImagePayload(value: string): boolean {
   return compact.length > 300 && BASE64_IMAGE_PAYLOAD_PATTERN.test(compact);
 }
 
+function normalizeBase64ImagePayload(value: string): string {
+  const standard = value.replace(/\s+/g, '').replace(/-/g, '+').replace(/_/g, '/');
+  const missingPadding = standard.length % 4;
+  return missingPadding === 0 ? standard : `${standard}${'='.repeat(4 - missingPadding)}`;
+}
+
 function isLikelyImageResultKey(keyPath: string): boolean {
   return /(image|img|url|output|result|asset|file|media|b64|base64|data)/i.test(keyPath);
 }
@@ -117,7 +123,7 @@ function normalizeGeneratedImageSourceCandidate(value: string, keyPath: string):
     return hasImageExtension || isLikelyImageResultKey(keyPath) ? trimmed : null;
   }
   if (looksLikeBase64ImagePayload(trimmed) && isLikelyImageResultKey(keyPath)) {
-    return `data:image/png;base64,${trimmed.replace(/\s+/g, '')}`;
+    return `data:image/png;base64,${normalizeBase64ImagePayload(trimmed)}`;
   }
   return null;
 }
@@ -176,7 +182,7 @@ function normalizeGeneratedImageSource(rawSource: string): { source: string; not
 
   if (looksLikeBase64ImagePayload(trimmed)) {
     return {
-      source: `data:image/png;base64,${trimmed.replace(/\s+/g, '')}`,
+      source: `data:image/png;base64,${normalizeBase64ImagePayload(trimmed)}`,
       note: 'normalized bare base64 image result to data URL',
     };
   }

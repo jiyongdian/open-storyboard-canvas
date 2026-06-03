@@ -18,6 +18,11 @@ import {
 import { useSettingsStore } from '@/stores/settingsStore';
 import { hasCustomProviderCredential } from '@/features/canvas/application/providerAvailability';
 import {
+  buildProviderUrl,
+  ensureProviderBaseUrlDirectory,
+  normalizeProviderBaseUrl,
+} from '@/features/canvas/application/providerUrl';
+import {
   asPlainRecord,
   requiresMultipartReferenceImage,
   resolveCustomProviderBodyMode,
@@ -50,6 +55,9 @@ const POLL_TIMEOUT_MS = 120000;
 const VIDEO_POLL_TIMEOUT_MS = 15 * 60 * 1000;
 const CONNECTIVITY_TEST_POLL_TIMEOUT_MS = 180000;
 const GENERATION_REQUEST_TIMEOUT_MS = 180000;
+const GENERATION_SUBMIT_NETWORK_RETRY_ATTEMPTS = 2;
+const GENERATION_SUBMIT_NETWORK_RETRY_DELAY_MS = 700;
+const GENERATION_SUBMIT_NETWORK_ERROR_PREFIX = '提交阶段网络请求失败';
 const RESULT_POLL_INTERVAL_MS = 1000;
 const RESULT_POLL_REQUEST_TIMEOUT_MS = 30000;
 const RESULT_POLL_NETWORK_RETRY_ATTEMPTS = 3;
@@ -108,7 +116,7 @@ function buildAgnesProviderConfig(mediaType: 'image' | 'video', apiKey: string):
       httpMethod: 'POST',
       apiKey,
       apiStyle: 'openai-compatible',
-      models: [AGNES_PROVIDER_DEFAULTS.models.video20, AGNES_PROVIDER_DEFAULTS.models.video12],
+      models: [AGNES_PROVIDER_DEFAULTS.models.video20],
       supportsWebSearch: false,
       supportedResolutions: [...AGNES_PROVIDER_DEFAULTS.videoResolutions],
       responseFormat: 'generic',
@@ -148,7 +156,7 @@ function buildAgnesProviderConfig(mediaType: 'image' | 'video', apiKey: string):
     httpMethod: 'POST',
     apiKey,
     apiStyle: 'openai-compatible',
-    models: [AGNES_PROVIDER_DEFAULTS.models.image21Flash, AGNES_PROVIDER_DEFAULTS.models.image20Flash, AGNES_PROVIDER_DEFAULTS.models.image12],
+    models: [AGNES_PROVIDER_DEFAULTS.models.image21Flash, AGNES_PROVIDER_DEFAULTS.models.image20Flash],
     supportsWebSearch: false,
     supportedResolutions: [...AGNES_PROVIDER_DEFAULTS.imageResolutions],
     responseFormat: 'openai-images',
@@ -1007,9 +1015,8 @@ function resolveModernProviderBodyMode(
 }
 
 function resolveModelListUrl(cfg: CustomProviderConfig): string {
-  const base = cfg.baseUrl.replace(/\/+$/, '');
   const path = (cfg.modelListEndpointPath ?? '').trim() || '/models';
-  return appendQueryParams(`${base}${path.startsWith('/') ? '' : '/'}${path}`, cfg.queryParams ?? {});
+  return buildProviderUrl(cfg.baseUrl, path, cfg.queryParams ?? {});
 }
 
 function resolveModernEndpointPath(cfg: CustomProviderConfig, request: GenerateRequest): string | null {
@@ -1033,11 +1040,11 @@ function resolveEndpointUrlForRequest(
   request: GenerateRequest,
   dynamicQueryParams?: Record<string, string>,
 ): string {
-  const base = cfg.baseUrl.replace(/\/+$/, '');
+  const base = normalizeProviderBaseUrl(cfg.baseUrl);
   const modernPath = resolveModernEndpointPath(cfg, request);
   const configuredPath = (modernPath ?? cfg.endpointPath ?? '').trim();
   const joined = configuredPath
-    ? `${base}${configuredPath.startsWith('/') ? '' : '/'}${configuredPath}`
+    ? buildProviderUrl(base, configuredPath)
     : guessDefaultPath(cfg.apiStyle, base);
   const withModel = joined
     .replace(/\{model\}/g, encodeURIComponent(modelName))
@@ -1190,6 +1197,7 @@ async function requestJson(
     multipart?: CustomHttpMultipartBody;
     timeoutMs?: number;
     errorPrefix?: string;
+    networkErrorPrefix?: string;
     networkRetryAttempts?: number;
     networkRetryDelayMs?: number;
     retryHttpStatuses?: number[];
@@ -1242,8 +1250,13 @@ async function requestJson(
     throw lastRetryableHttpError;
   }
   const message = lastNetworkError instanceof Error ? lastNetworkError.message : String(lastNetworkError);
+  const networkErrorPrefix = options.networkErrorPrefix
+    ?? (options.errorPrefix ? `${options.errorPrefix} 网络请求失败` : '网络请求失败');
+  const retrySummary = options.networkErrorPrefix && retryAttempts > 0
+    ? `（已重试 ${retryAttempts} 次）`
+    : '';
   throw new NetworkRequestError(
-    `${options.errorPrefix ? `${options.errorPrefix} ` : ''}网络请求失败：${message}`
+    `${networkErrorPrefix}${retrySummary}：${message}`
   );
 }
 
@@ -1253,8 +1266,20 @@ function sleep(delayMs: number): Promise<void> {
 
 function guessDefaultPath(apiStyle: string, base: string): string {
   switch (apiStyle) {
-    case 'openai-compatible':
+    case 'openai-compatible': {
+      try {
+        const pathname = new URL(base).pathname.replace(/\/+$/, '');
+        if (/(?:^|\/)(?:images\/generations|images\/edits|responses|chat\/completions|videos)$/.test(pathname)) {
+          return base;
+        }
+        if (!pathname) {
+          return `${base}/v1/images/generations`;
+        }
+      } catch {
+        // Fall through to the historical default path.
+      }
       return `${base}/images/generations`;
+    }
     case 'fal':
       return base;
     case 'stability':
@@ -1265,6 +1290,20 @@ function guessDefaultPath(apiStyle: string, base: string): string {
 }
 
 function extractFirstImageUrl(cfg: CustomProviderConfig, payload: unknown): string | null {
+  if (typeof payload === 'string') {
+    const nested = parseNestedJsonString(payload.trim());
+    if (nested !== null) {
+      const nestedImage = extractFirstImageUrl(cfg, nested);
+      if (nestedImage) return nestedImage;
+    }
+  }
+
+  const unwrappedPayload = unwrapProviderPayload(payload);
+  if (!Object.is(unwrappedPayload, payload)) {
+    const unwrapped = extractFirstImageUrl(cfg, unwrappedPayload);
+    if (unwrapped) return unwrapped;
+  }
+
   const hinted = extractByPath(cfg, payload, cfg.extraParams?.responseImagePath);
   if (hinted) return hinted;
 
@@ -1272,10 +1311,17 @@ function extractFirstImageUrl(cfg: CustomProviderConfig, payload: unknown): stri
   switch (format) {
     case 'openai-images': {
       const data = (payload as { data?: Array<{ url?: string; b64_json?: string } | string> }).data;
-      const first = data?.[0];
-      if (typeof first === 'string') return normalizeImageSourceForProvider(cfg, first);
-      if (first?.url) return normalizeImageSourceForProvider(cfg, first.url);
-      if (first?.b64_json) return normalizeImageSourceForProvider(cfg, first.b64_json);
+      if (Array.isArray(data)) {
+        for (const item of data) {
+          if (typeof item === 'string') return normalizeImageSourceForProvider(cfg, item);
+          if (item?.url) return normalizeImageSourceForProvider(cfg, item.url);
+          if (item?.b64_json) return normalizeImageSourceForProvider(cfg, item.b64_json);
+          const nested = scanForImageSource(cfg, item);
+          if (nested) return nested;
+        }
+      }
+      const responsesOutput = extractOpenAiResponsesImageResult(cfg, payload);
+      if (responsesOutput) return responsesOutput;
       return scanForImageSource(cfg, payload);
     }
     case 'url-array': {
@@ -1286,17 +1332,33 @@ function extractFirstImageUrl(cfg: CustomProviderConfig, payload: unknown): stri
       if (Array.isArray(maybe) && typeof maybe[0] === 'string') {
         return normalizeImageSourceForProvider(cfg, maybe[0] as string);
       }
-      return null;
+      return scanForImageSource(cfg, payload);
     }
     case 'data-url': {
       if (typeof payload === 'string') return normalizeImageSourceForProvider(cfg, payload);
       const maybe = (payload as { image?: string; data?: string }).image ?? (payload as { data?: string }).data;
-      return typeof maybe === 'string' ? normalizeImageSourceForProvider(cfg, maybe) : null;
+      return typeof maybe === 'string' ? normalizeImageSourceForProvider(cfg, maybe) : scanForImageSource(cfg, payload);
     }
     default: {
       return scanForImageSource(cfg, payload);
     }
   }
+}
+
+function extractOpenAiResponsesImageResult(cfg: CustomProviderConfig, payload: unknown): string | null {
+  const output = (payload as { output?: unknown }).output;
+  if (!Array.isArray(output)) return null;
+  for (const item of output) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item as Record<string, unknown>;
+    const type = typeof record.type === 'string' ? record.type : '';
+    if (type !== 'image_generation_call') continue;
+    const directResult = extractByPath(cfg, record, 'result');
+    if (directResult) return directResult;
+    const nestedResult = scanForImageSource(cfg, record.result);
+    if (nestedResult) return nestedResult;
+  }
+  return null;
 }
 
 function scanForImageSource(cfg: CustomProviderConfig, payload: unknown): string | null {
@@ -1339,6 +1401,10 @@ function extractByPath(cfg: CustomProviderConfig, payload: unknown, rawPath: unk
       ? normalizeImageSourceForProvider(cfg, trimmed)
       : extractEmbeddedImageUrl(cfg, trimmed, 'image');
   }
+  if (current !== null && current !== undefined) {
+    const scanned = scanForImageSource(cfg, current);
+    if (scanned) return scanned;
+  }
   return scanForImageSource(cfg, current);
 }
 
@@ -1377,8 +1443,15 @@ function parseNestedJsonString(value: string): unknown | null {
 function normalizeImageSource(value: string): string {
   const trimmed = value.trim();
   if (trimmed.startsWith('data:image/')) return trimmed;
-  const base64Like = /^[A-Za-z0-9+/=]+$/.test(trimmed) && trimmed.length > 300;
-  return base64Like ? `data:image/png;base64,${trimmed}` : trimmed;
+  const compact = trimmed.replace(/\s+/g, '');
+  const base64Like = /^[A-Za-z0-9+/_=-]+$/.test(compact) && compact.length > 300;
+  if (!base64Like) return trimmed;
+  const standardBase64Raw = compact.replace(/-/g, '+').replace(/_/g, '/');
+  const missingPadding = standardBase64Raw.length % 4;
+  const standardBase64 = missingPadding === 0
+    ? standardBase64Raw
+    : `${standardBase64Raw}${'='.repeat(4 - missingPadding)}`;
+  return `data:image/png;base64,${standardBase64}`;
 }
 
 function normalizeImageSourceForProvider(cfg: CustomProviderConfig, value: string): string {
@@ -1401,7 +1474,7 @@ function normalizeImageSourceForProvider(cfg: CustomProviderConfig, value: strin
 
 function resolveProviderProtocol(cfg: CustomProviderConfig): string | null {
   try {
-    return new URL(cfg.baseUrl).protocol;
+    return new URL(normalizeProviderBaseUrl(cfg.baseUrl)).protocol;
   } catch {
     return null;
   }
@@ -1409,18 +1482,12 @@ function resolveProviderProtocol(cfg: CustomProviderConfig): string | null {
 
 function absolutizeProviderUrl(cfg: CustomProviderConfig, value: string): string {
   try {
-    const baseUrl = ensureBaseUrlDirectory(cfg.baseUrl);
+    const baseUrl = ensureProviderBaseUrlDirectory(cfg.baseUrl);
     if (!baseUrl) return value;
     return new URL(value, baseUrl).toString();
   } catch {
     return value;
   }
-}
-
-function ensureBaseUrlDirectory(baseUrl: string): string | null {
-  const trimmed = baseUrl.trim();
-  if (!trimmed) return null;
-  return trimmed.endsWith('/') ? trimmed : `${trimmed}/`;
 }
 
 function extractEmbeddedImageUrl(cfg: CustomProviderConfig, value: string, key: string): string | null {
@@ -1449,7 +1516,7 @@ function isProbablyImageSource(value: string, key: string): boolean {
     return /(image|images|img|output|result|asset|file|media|thumbnail|cover)/i.test(key);
   }
   if (isRelativeImageSource(value, key)) return true;
-  return /^[A-Za-z0-9+/=]+$/.test(value)
+  return /^[A-Za-z0-9+/_=\s-]+$/.test(value)
     && value.length > 300
     && /(b64|base64|image|img|data|result|output)/i.test(key);
 }
@@ -1725,7 +1792,8 @@ function buildOpenAiVideoContentUrl(cfg: CustomProviderConfig, taskId: string): 
 
 function resolveDefaultOpenAiVideoEndpointPath(cfg: CustomProviderConfig): string {
   try {
-    const path = new URL(cfg.baseUrl).pathname.replace(/\/+$/, '');
+    const path = new URL(normalizeProviderBaseUrl(cfg.baseUrl)).pathname.replace(/\/+$/, '');
+    if (path.endsWith('/videos')) return '';
     return path.endsWith('/v1') ? '/videos' : DEFAULT_OPENAI_VIDEO_ENDPOINT_PATH;
   } catch {
     return DEFAULT_OPENAI_VIDEO_ENDPOINT_PATH;
@@ -2053,6 +2121,9 @@ async function sendVideoGenerationRequest(
     body,
     multipart,
     timeoutMs: GENERATION_REQUEST_TIMEOUT_MS,
+    networkErrorPrefix: GENERATION_SUBMIT_NETWORK_ERROR_PREFIX,
+    networkRetryAttempts: GENERATION_SUBMIT_NETWORK_RETRY_ATTEMPTS,
+    networkRetryDelayMs: GENERATION_SUBMIT_NETWORK_RETRY_DELAY_MS,
   });
   return parsed;
 }
@@ -2292,6 +2363,9 @@ async function sendGenerationRequest(
     body: method === 'POST' && (bodyMode === 'json' || bodyMode === 'form-urlencoded') ? body : undefined,
     multipart: method === 'POST' && bodyMode === 'multipart' ? multipart : undefined,
     timeoutMs: timeoutMs ?? GENERATION_REQUEST_TIMEOUT_MS,
+    networkErrorPrefix: GENERATION_SUBMIT_NETWORK_ERROR_PREFIX,
+    networkRetryAttempts: GENERATION_SUBMIT_NETWORK_RETRY_ATTEMPTS,
+    networkRetryDelayMs: GENERATION_SUBMIT_NETWORK_RETRY_DELAY_MS,
   });
   return parsed;
 }
@@ -2370,9 +2444,7 @@ function resolveAsyncTaskConfig(cfg: CustomProviderConfig): AsyncTaskConfig | nu
 
 function resolveAsyncTaskUrl(cfg: CustomProviderConfig, pathTemplate: string, taskId: string): string {
   const filled = pathTemplate.replace(/\{taskId\}/g, encodeURIComponent(taskId));
-  if (/^https?:\/\//i.test(filled)) return appendQueryParams(filled, cfg.queryParams ?? {});
-  const base = cfg.baseUrl.replace(/\/+$/, '');
-  return appendQueryParams(`${base}${filled.startsWith('/') ? '' : '/'}${filled}`, cfg.queryParams ?? {});
+  return buildProviderUrl(cfg.baseUrl, filled, cfg.queryParams ?? {});
 }
 
 function fillTaskTemplate(value: unknown, taskId: string): unknown {
@@ -2464,8 +2536,7 @@ async function pollAsyncTaskResult(
 }
 
 function resolveGrsaiResultUrl(cfg: CustomProviderConfig): string {
-  const base = cfg.baseUrl.replace(/\/+$/, '');
-  return appendQueryParams(`${base}/v1/draw/result`, cfg.queryParams ?? {});
+  return buildProviderUrl(cfg.baseUrl, '/v1/draw/result', cfg.queryParams ?? {});
 }
 
 async function pollGrsaiLikeResult(

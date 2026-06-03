@@ -18,6 +18,10 @@ import {
   fetchCustomProviderModels,
   type CustomProviderModelListResult,
 } from '@/features/canvas/infrastructure/customProviderGateway';
+import {
+  normalizeProviderBaseUrl,
+  normalizeProviderEndpointPath,
+} from '@/features/canvas/application/providerUrl';
 
 type ModernProviderKind =
   | 'openai-images'
@@ -384,13 +388,11 @@ function normalizeModelInput(value: string): string[] {
 }
 
 function normalizeEndpointPath(value: string): string {
-  const text = value.trim();
-  if (!text) return '';
-  return text.startsWith('/') ? text : `/${text}`;
+  return normalizeProviderEndpointPath(value);
 }
 
 function normalizeBaseUrlInput(value: string): string {
-  return value.trim().replace(/\/+$/, '');
+  return normalizeProviderBaseUrl(value);
 }
 
 function stripDuplicateApiVersion(baseUrl: string, paths: string[]): string {

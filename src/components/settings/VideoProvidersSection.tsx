@@ -7,6 +7,10 @@ import {
   useCustomProvidersStore,
   type CustomProviderConfig,
 } from '@/stores/customProvidersStore';
+import {
+  normalizeProviderBaseUrl,
+  normalizeProviderEndpointPath,
+} from '@/features/canvas/application/providerUrl';
 
 interface VideoModelDraft {
   id: string;
@@ -137,7 +141,6 @@ const VIDEO_PROVIDER_TEMPLATES: VideoProviderTemplate[] = [
     apiStyle: 'openai-compatible',
     models: [
       { id: AGNES_PROVIDER_DEFAULTS.models.video20, description: 'Agnes Video v2.0' },
-      { id: AGNES_PROVIDER_DEFAULTS.models.video12, description: 'Agnes Video v1.2' },
     ],
     durations: DEFAULT_DURATIONS,
     aspectRatios: DEFAULT_ASPECT_RATIOS,
@@ -223,13 +226,11 @@ function uniqueStrings(values: string[]): string[] {
 }
 
 function normalizeBaseUrl(value: string): string {
-  return value.trim().replace(/\/+$/, '');
+  return normalizeProviderBaseUrl(value);
 }
 
 function normalizeEndpointPath(value: string): string {
-  const text = value.trim();
-  if (!text) return '';
-  return text.startsWith('/') ? text : `/${text}`;
+  return normalizeProviderEndpointPath(value);
 }
 
 function parseJsonObject(text: string): { ok: boolean; value: Record<string, unknown>; error?: string } {
@@ -407,7 +408,7 @@ export const VideoProvidersSection = memo(function VideoProvidersSection() {
       mediaType: 'video',
       baseUrl: normalizeBaseUrl(baseUrl),
       endpointPath: normalizeEndpointPath(endpointPath),
-      modelListEndpointPath: modelListEndpointPath.trim(),
+      modelListEndpointPath: normalizeEndpointPath(modelListEndpointPath),
       httpMethod: 'POST',
       apiKey,
       apiStyle,

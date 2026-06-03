@@ -7,8 +7,14 @@ import {
   type CanvasNodeType,
   type VideoNodeData,
 } from '@/features/canvas/domain/canvasNodes';
+import {
+  DEFAULT_GENERATED_VIDEO_DISPLAY_NAME,
+  extractFileNameFromPath,
+  resolveCustomGeneratedVideoName,
+} from '@/features/canvas/application/generatedMediaNaming';
 import { resolveImageDisplayUrl } from '@/features/canvas/application/imageData';
 import { resolveNodeDisplayName } from '@/features/canvas/domain/nodeDisplay';
+import { renameLocalMediaFiles } from '@/commands/image';
 import { NodeHeader, NODE_HEADER_FLOATING_POSITION_CLASS } from '@/features/canvas/ui/NodeHeader';
 import { NodeResizeHandle } from '@/features/canvas/ui/NodeResizeHandle';
 import { useCanvasStore } from '@/stores/canvasStore';
@@ -79,6 +85,43 @@ export const VideoNode = memo(({ id, data, selected, type, width, height }: Vide
     return Math.floor(Math.max(0, now - generationStartedAt) / 60000);
   }, [generationStartedAt, isGenerating, now]);
 
+  const handleTitleChange = async (nextTitle: string) => {
+    if (!data.localVideoUrl) {
+      updateNodeData(id, { displayName: nextTitle });
+      return;
+    }
+
+    const normalizedTitle = nextTitle.trim() || DEFAULT_GENERATED_VIDEO_DISPLAY_NAME;
+    const desiredFileName = resolveCustomGeneratedVideoName(normalizedTitle) ?? undefined;
+    const fallbackPatch = {
+      displayName: normalizedTitle,
+      generatedFileName: desiredFileName
+        ? data.generatedFileName ?? extractFileNameFromPath(data.localVideoUrl)
+        : null,
+      generatedNamingMode: desiredFileName ? 'custom' as const : 'default' as const,
+    };
+
+    try {
+      const renamed = await renameLocalMediaFiles({
+        primaryPath: data.localVideoUrl,
+        desiredFileName,
+        mediaKind: 'video',
+      });
+      const shouldPreserveVideoUrl = Boolean(data.videoUrl && data.videoUrl !== data.localVideoUrl);
+
+      updateNodeData(id, {
+        displayName: normalizedTitle,
+        videoUrl: shouldPreserveVideoUrl ? data.videoUrl : renamed.primaryPath,
+        localVideoUrl: renamed.primaryPath,
+        generatedFileName: renamed.fileName ?? extractFileNameFromPath(renamed.primaryPath),
+        generatedNamingMode: desiredFileName ? 'custom' : 'default',
+      });
+    } catch (error) {
+      console.warn('[VideoNode] failed to rename generated video file', { id, error });
+      updateNodeData(id, fallbackPatch);
+    }
+  };
+
   return (
     <div
       className={`
@@ -100,7 +143,9 @@ export const VideoNode = memo(({ id, data, selected, type, width, height }: Vide
         titleText={resolvedTitle}
         titleClassName="inline-block max-w-[220px] truncate whitespace-nowrap align-bottom"
         editable
-        onTitleChange={(nextTitle) => updateNodeData(id, { displayName: nextTitle })}
+        onTitleChange={(nextTitle) => {
+          void handleTitleChange(nextTitle);
+        }}
         rightSlot={data.durationSeconds ? (
           <span className="rounded-full bg-accent/80 px-2 py-[1px] text-[10px] font-medium leading-tight text-white">
             {data.durationSeconds}s

@@ -109,7 +109,6 @@ export function buildVideoModelCatalog(
   if (agnesApiKey.trim()) {
     for (const [modelId, modelLabel] of [
       [AGNES_PROVIDER_DEFAULTS.models.video20, 'Agnes Video v2.0'],
-      [AGNES_PROVIDER_DEFAULTS.models.video12, 'Agnes Video v1.2'],
     ] as const) {
       entries.push({
         id: `agnes:video:${modelId}`,

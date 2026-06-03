@@ -26,7 +26,13 @@ import {
   resolveImageDisplayUrl,
   shouldUseOriginalImageByZoom,
 } from '@/features/canvas/application/imageData';
+import {
+  DEFAULT_GENERATED_IMAGE_DISPLAY_NAME,
+  extractFileNameFromPath,
+  resolveCustomGeneratedImageName,
+} from '@/features/canvas/application/generatedMediaNaming';
 import { resolveNodeDisplayName } from '@/features/canvas/domain/nodeDisplay';
+import { renameLocalMediaFiles } from '@/commands/image';
 import { NodeHeader, NODE_HEADER_FLOATING_POSITION_CLASS } from '@/features/canvas/ui/NodeHeader';
 import { NodeResizeHandle } from '@/features/canvas/ui/NodeResizeHandle';
 import { CanvasNodeImage } from '@/features/canvas/ui/CanvasNodeImage';
@@ -147,6 +153,46 @@ export const ImageNode = memo(({ id, data, selected, type, width, height }: Imag
     return resolveImageDisplayUrl(data.imageUrl);
   }, [data.imageUrl]);
 
+  const handleTitleChange = async (nextTitle: string) => {
+    if (!isExportResultNode || !data.imageUrl) {
+      updateNodeData(id, { displayName: nextTitle });
+      return;
+    }
+
+    const normalizedTitle = nextTitle.trim() || DEFAULT_GENERATED_IMAGE_DISPLAY_NAME;
+    const desiredFileName = resolveCustomGeneratedImageName(normalizedTitle) ?? undefined;
+    const fallbackPatch = {
+      displayName: normalizedTitle,
+      generatedFileName: desiredFileName
+        ? data.generatedFileName ?? extractFileNameFromPath(data.imageUrl)
+        : null,
+      generatedNamingMode: desiredFileName ? 'custom' as const : 'default' as const,
+    };
+
+    try {
+      const renamed = await renameLocalMediaFiles({
+        primaryPath: data.imageUrl,
+        previewPath:
+          data.previewImageUrl && data.previewImageUrl !== data.imageUrl
+            ? data.previewImageUrl
+            : undefined,
+        desiredFileName,
+        mediaKind: 'image',
+      });
+
+      updateNodeData(id, {
+        displayName: normalizedTitle,
+        imageUrl: renamed.primaryPath,
+        previewImageUrl: renamed.previewPath ?? renamed.primaryPath,
+        generatedFileName: renamed.fileName ?? extractFileNameFromPath(renamed.primaryPath),
+        generatedNamingMode: desiredFileName ? 'custom' : 'default',
+      });
+    } catch (error) {
+      console.warn('[ImageNode] failed to rename generated image file', { id, error });
+      updateNodeData(id, fallbackPatch);
+    }
+  };
+
   return (
     <div
       className={`
@@ -170,7 +216,9 @@ export const ImageNode = memo(({ id, data, selected, type, width, height }: Imag
         titleText={resolvedTitle}
         titleClassName="inline-block max-w-[220px] truncate whitespace-nowrap align-bottom"
         editable
-        onTitleChange={(nextTitle) => updateNodeData(id, { displayName: nextTitle })}
+        onTitleChange={(nextTitle) => {
+          void handleTitleChange(nextTitle);
+        }}
         rightSlot={
           data.batchId &&
           typeof data.batchIndex === 'number' &&

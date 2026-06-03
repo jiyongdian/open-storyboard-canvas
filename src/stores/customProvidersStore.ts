@@ -118,11 +118,9 @@ export const AGNES_PROVIDER_DEFAULTS = {
   imageResolutions: ['1k', '2k', '1024x1024', '1536x1024', '1024x1536', 'auto'],
   videoResolutions: ['1k', '2k', '1280x720', '720x1280', '1024x1024'],
   models: {
-    image12: 'agnes-image-1.2',
     image21Flash: 'agnes-image-2.1-flash',
     image20Flash: 'agnes-image-2.0-flash',
     video20: 'agnes-video-v2.0',
-    video12: 'agnes-video-v1.2',
   },
 } as const;
 
@@ -188,7 +186,7 @@ export const CUSTOM_PROVIDER_PRESETS: CustomProviderPreset[] = [
       httpMethod: 'POST',
       apiStyle: 'openai-compatible',
       responseFormat: 'openai-images',
-      models: [AGNES_PROVIDER_DEFAULTS.models.image21Flash, AGNES_PROVIDER_DEFAULTS.models.image20Flash, AGNES_PROVIDER_DEFAULTS.models.image12],
+      models: [AGNES_PROVIDER_DEFAULTS.models.image21Flash, AGNES_PROVIDER_DEFAULTS.models.image20Flash],
       supportsWebSearch: false,
       supportedResolutions: [...AGNES_PROVIDER_DEFAULTS.imageResolutions],
       extraParams: {
@@ -212,7 +210,7 @@ export const CUSTOM_PROVIDER_PRESETS: CustomProviderPreset[] = [
       httpMethod: 'POST',
       apiStyle: 'openai-compatible',
       responseFormat: 'generic',
-      models: [AGNES_PROVIDER_DEFAULTS.models.video20, AGNES_PROVIDER_DEFAULTS.models.video12],
+      models: [AGNES_PROVIDER_DEFAULTS.models.video20],
       supportsWebSearch: false,
       supportedResolutions: [...AGNES_PROVIDER_DEFAULTS.videoResolutions],
       extraParams: {

@@ -11,7 +11,16 @@ import {
 } from '@/features/canvas/application/generationErrorReport';
 import { isLightweightGenerationRetryResultUrl } from '@/features/canvas/application/generationRetry';
 import { showErrorDialog } from '@/features/canvas/application/errorDialog';
-import { embedStoryboardImageMetadata, persistVideoSource } from '@/commands/image';
+import {
+  embedStoryboardImageMetadata,
+  persistVideoSource,
+  renameLocalMediaFiles,
+} from '@/commands/image';
+import {
+  extractFileNameFromPath,
+  resolveCustomGeneratedImageName,
+  resolveCustomGeneratedVideoName,
+} from '@/features/canvas/application/generatedMediaNaming';
 
 interface GenerationStoryboardMetadata {
   gridRows: number;
@@ -169,6 +178,16 @@ interface PollContext {
   translateError: (key: string) => string;
 }
 
+function formatPrepareErrorDetails(error: unknown): string {
+  if (error instanceof Error) {
+    const details = (error as Error & { details?: unknown }).details;
+    return typeof details === 'string' && details.trim()
+      ? `${error.message}\n${details}`
+      : error.message;
+  }
+  return String(error);
+}
+
 async function prepareCompletedImageResult(
   nodeId: string,
   resultUrl: string,
@@ -200,9 +219,7 @@ async function prepareCompletedImageResult(
   }
   if (!prepared) {
     const errorMessage = translateError('node.imageNode.fetchResultFailed') || '获取生成结果失败';
-    const errorDetails = lastPrepareError instanceof Error
-      ? lastPrepareError.message
-      : String(lastPrepareError);
+    const errorDetails = formatPrepareErrorDetails(lastPrepareError);
     const generationClientSessionId =
       typeof currentData.generationClientSessionId === 'string'
         ? currentData.generationClientSessionId
@@ -253,11 +270,36 @@ async function prepareCompletedImageResult(
   }
   const previewWithMetadata =
     prepared.previewImageUrl === prepared.imageUrl ? imageWithMetadata : prepared.previewImageUrl;
+  const displayName = typeof currentData.displayName === 'string' ? currentData.displayName : null;
+  const desiredFileName = resolveCustomGeneratedImageName(displayName) ?? undefined;
+  let finalImageUrl = imageWithMetadata;
+  let finalPreviewImageUrl = previewWithMetadata;
+  let generatedFileName = extractFileNameFromPath(imageWithMetadata);
+  const generatedNamingMode = desiredFileName ? 'custom' : 'default';
+
+  try {
+    const renamed = await renameLocalMediaFiles({
+      primaryPath: imageWithMetadata,
+      previewPath: previewWithMetadata !== imageWithMetadata ? previewWithMetadata : undefined,
+      desiredFileName,
+      mediaKind: 'image',
+    });
+    finalImageUrl = renamed.primaryPath;
+    finalPreviewImageUrl = renamed.previewPath ?? renamed.primaryPath;
+    generatedFileName = renamed.fileName;
+  } catch (error) {
+    console.warn('[GenerationJob] renameLocalMediaFiles failed for image result', {
+      nodeId,
+      error,
+    });
+  }
 
   updateNodeData(nodeId, {
-    imageUrl: imageWithMetadata,
-    previewImageUrl: previewWithMetadata,
+    imageUrl: finalImageUrl,
+    previewImageUrl: finalPreviewImageUrl,
     aspectRatio: prepared.aspectRatio,
+    generatedFileName,
+    generatedNamingMode,
     isGenerating: false,
     generationStartedAt: null,
     generationJobId: null,
@@ -349,9 +391,32 @@ async function prepareCompletedVideoResult(
   const lightweightResultUrl = isLightweightGenerationRetryResultUrl(trimmedResultUrl)
     ? trimmedResultUrl
     : null;
+  const displayName = typeof currentData.displayName === 'string' ? currentData.displayName : null;
+  const desiredFileName = resolveCustomGeneratedVideoName(displayName) ?? undefined;
+  let finalLocalVideoUrl = localVideoUrl;
+  let generatedFileName = extractFileNameFromPath(localVideoUrl);
+  const generatedNamingMode = desiredFileName ? 'custom' : 'default';
+
+  try {
+    const renamed = await renameLocalMediaFiles({
+      primaryPath: localVideoUrl,
+      desiredFileName,
+      mediaKind: 'video',
+    });
+    finalLocalVideoUrl = renamed.primaryPath;
+    generatedFileName = renamed.fileName;
+  } catch (error) {
+    console.warn('[GenerationJob] renameLocalMediaFiles failed for video result', {
+      nodeId,
+      error,
+    });
+  }
+
   updateNodeData(nodeId, {
-    videoUrl: lightweightResultUrl ?? localVideoUrl,
-    localVideoUrl,
+    videoUrl: lightweightResultUrl ?? finalLocalVideoUrl,
+    localVideoUrl: finalLocalVideoUrl,
+    generatedFileName,
+    generatedNamingMode,
     isGenerating: false,
     generationStartedAt: null,
     generationJobId: null,

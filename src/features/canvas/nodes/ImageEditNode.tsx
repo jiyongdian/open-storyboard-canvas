@@ -41,6 +41,10 @@ import {
 import { resolveClipboardImageFile } from '@/features/canvas/hooks/useCanvasShortcuts';
 import { appendGenerationParameterConstraints } from '@/features/canvas/application/generationPromptConstraints';
 import {
+  acquireGenerationSubmitLock,
+  generationSubmitLockKey,
+} from '@/features/canvas/application/generationSubmitLock';
+import {
   buildGenerationErrorReport,
   CURRENT_RUNTIME_SESSION_ID,
   createReferenceImagePlaceholders,
@@ -511,6 +515,14 @@ export const ImageEditNode = memo(({ id, data, selected, width, height }: ImageE
   }, [showCountPicker]);
 
   const handleGenerate = useCallback(async () => {
+    const releaseSubmitLock = acquireGenerationSubmitLock(
+      generationSubmitLockKey(id, 'image-edit-node')
+    );
+    if (!releaseSubmitLock) {
+      return;
+    }
+
+    try {
     const currentPromptDraft = promptDraftRef.current;
     flushPromptDraft(currentPromptDraft);
     const latestCanvasState = useCanvasStore.getState();
@@ -759,6 +771,9 @@ export const ImageEditNode = memo(({ id, data, selected, width, height }: ImageE
           generationDebugContext,
         });
       }
+    }
+    } finally {
+      releaseSubmitLock();
     }
   }, [
     addNode,

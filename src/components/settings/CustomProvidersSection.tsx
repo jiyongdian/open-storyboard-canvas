@@ -19,6 +19,10 @@ import {
   resolveCustomProviderBodyMode,
   type CustomProviderBodyMode,
 } from '@/features/canvas/infrastructure/customProviderTransport';
+import {
+  normalizeProviderBaseUrl,
+  normalizeProviderEndpointPath,
+} from '@/features/canvas/application/providerUrl';
 
 /** Which half of the split UI to render. `both` keeps the original tabbed view
  *  (kept for backwards compat); `add` is the new "添加服务商" settings tab
@@ -157,9 +161,9 @@ function fromDraft(d: DraftConfig, fallbackId: string): CustomProviderConfig {
     id: d.id ?? fallbackId,
     label: d.label.trim() || '未命名配置',
     mediaType: d.mediaType ?? 'image',
-    baseUrl: d.baseUrl.trim(),
-    endpointPath: d.endpointPath?.trim() || '',
-    modelListEndpointPath: d.modelListEndpointPath?.trim() || '',
+    baseUrl: normalizeProviderBaseUrl(d.baseUrl),
+    endpointPath: normalizeProviderEndpointPath(d.endpointPath ?? ''),
+    modelListEndpointPath: normalizeProviderEndpointPath(d.modelListEndpointPath ?? ''),
     httpMethod: d.httpMethod ?? 'POST',
     apiKey: d.apiKey,
     apiStyle: d.apiStyle,

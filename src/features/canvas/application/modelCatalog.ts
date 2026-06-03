@@ -173,17 +173,6 @@ export function buildImageModelCatalog({
     const supportedResolutions = [...AGNES_PROVIDER_DEFAULTS.imageResolutions];
     entries.push(
       {
-        id: `agnes:image:${AGNES_PROVIDER_DEFAULTS.models.image12}`,
-        kind: 'agnes',
-        providerId: 'agnes',
-        providerLabel: 'Agnes',
-        modelId: AGNES_PROVIDER_DEFAULTS.models.image12,
-        modelLabel: 'Agnes Image 1.2',
-        supportedRatios,
-        usable: true,
-        supportedResolutions,
-      },
-      {
         id: `agnes:image:${AGNES_PROVIDER_DEFAULTS.models.image21Flash}`,
         kind: 'agnes',
         providerId: 'agnes',

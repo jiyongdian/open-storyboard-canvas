@@ -22,6 +22,10 @@ import { canvasAiGateway } from '@/features/canvas/application/canvasServices';
 import { CURRENT_RUNTIME_SESSION_ID } from '@/features/canvas/application/generationErrorReport';
 import { appendGenerationParameterConstraints } from '@/features/canvas/application/generationPromptConstraints';
 import {
+  acquireGenerationSubmitLock,
+  generationSubmitLockKey,
+} from '@/features/canvas/application/generationSubmitLock';
+import {
   resolveImageModelResolution,
 } from '@/features/canvas/models';
 import { resolveActiveModelForPanel } from '@/features/canvas/application/resolveActiveModelForPanel';
@@ -223,6 +227,14 @@ export const SelectedNodeOverlay = memo(() => {
       return;
     }
 
+    const releaseSubmitLock = acquireGenerationSubmitLock(
+      generationSubmitLockKey(selectedNode.id, `overlay-${panelState.type ?? 'edit'}`)
+    );
+    if (!releaseSubmitLock) {
+      return;
+    }
+
+    try {
     // Pick the model the user chose in whichever panel is currently open
     // (each panel persists its own `lastModelConfigByPanel[panelKey]` entry
     // via ModelConfigPicker). Fall back to edit when the active panel type
@@ -307,6 +319,9 @@ export const SelectedNodeOverlay = memo(() => {
       });
       await showErrorDialog(error instanceof Error ? error.message : '提交生成任务失败', '错误');
     }
+    } finally {
+      releaseSubmitLock();
+    }
   }, [appendParameterConstraintsToPrompt, selectedNode, selectedNodeImageData, findNodePosition, addNode, addEdge, updateNodeData, panelState, t]);
 
   const handleSubmitPromptPreset = useCallback(async (presetId: string, modelConfig: ModelConfigValue) => {
@@ -363,6 +378,14 @@ export const SelectedNodeOverlay = memo(() => {
       return;
     }
 
+    const releaseSubmitLock = acquireGenerationSubmitLock(
+      generationSubmitLockKey(selectedNode.id, `overlay-prompt-preset-${presetId}`)
+    );
+    if (!releaseSubmitLock) {
+      return;
+    }
+
+    try {
     await setNativeApiKeyIfNeeded(resolved);
 
     const ratioForGateway = resolved.ratio === 'auto'
@@ -426,6 +449,9 @@ export const SelectedNodeOverlay = memo(() => {
       });
       await showErrorDialog(message, t('common.error'));
     }
+    } finally {
+      releaseSubmitLock();
+    }
   }, [
     addEdge,
     addNode,
@@ -457,6 +483,14 @@ export const SelectedNodeOverlay = memo(() => {
       return;
     }
 
+    const releaseSubmitLock = acquireGenerationSubmitLock(
+      generationSubmitLockKey(selectedNode.id, `overlay-panorama-${config.sourceMode}`)
+    );
+    if (!releaseSubmitLock) {
+      return;
+    }
+
+    try {
     const resultTitle = `全景 · ${prompt.trim().slice(0, 20) || (config.sourceMode === 'image' ? '图生全景' : '未命名')}`;
     const panoramaSourceMode = config.sourceMode === 'image' ? 'image' : 'text';
     const panoNodePosition = findNodePosition(selectedNode.id, 560, 340);
@@ -582,6 +616,9 @@ export const SelectedNodeOverlay = memo(() => {
       });
       await showErrorDialog(error instanceof Error ? error.message : '提交全景生成任务失败', '错误');
     }
+    } finally {
+      releaseSubmitLock();
+    }
   }, [appendParameterConstraintsToPrompt, selectedNode, selectedNodeImageData, findNodePosition, addNode, addEdge, updateNodeData, panelState]);
 
   /**
@@ -602,6 +639,14 @@ export const SelectedNodeOverlay = memo(() => {
       return;
     }
 
+    const releaseSubmitLock = acquireGenerationSubmitLock(
+      generationSubmitLockKey(selectedNode.id, 'overlay-blueprint')
+    );
+    if (!releaseSubmitLock) {
+      return;
+    }
+
+    try {
     const resolved = resolveActiveModelForPanel('blueprint');
     if (resolved.resolvedByFallback && !resolved.usable) {
       await showErrorDialog(t('directorStudio.overlay.noModel'), t('common.error'));
@@ -695,6 +740,9 @@ export const SelectedNodeOverlay = memo(() => {
         error instanceof Error ? error.message : t('directorStudio.overlay.submitFailed'),
         t('common.error'),
       );
+    }
+    } finally {
+      releaseSubmitLock();
     }
   }, [appendParameterConstraintsToPrompt, selectedNode, selectedNodeImageData, findNodePosition, addNode, addEdge, updateNodeData, panelState, t]);
 
