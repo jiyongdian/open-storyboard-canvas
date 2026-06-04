@@ -6,11 +6,20 @@ import { persist } from 'zustand/middleware';
  * real deployments are reverse proxies / aggregators with non-standard shapes,
  * so we store the raw fields and let the generation adapter reshape them.
  */
+export type CustomProviderMediaType = 'image' | 'video' | 'chat';
+
+export interface CustomProviderChatModelMetadata {
+  supportsMultimodal?: boolean;
+  contextWindow?: number | null;
+  maxOutputTokens?: number | null;
+  description?: string | null;
+}
+
 export interface CustomProviderConfig {
   id: string;
   label: string;
   /** Persisted configuration target. Missing means legacy image config. */
-  mediaType?: 'image' | 'video';
+  mediaType?: CustomProviderMediaType;
   baseUrl: string;
   /** Concrete endpoint path appended to baseUrl. Different vendors wildly
    *  disagree — some use /images/generations, some /create, some /v1/chat/completions.
@@ -40,11 +49,17 @@ export interface CustomProviderConfig {
    *  or a vendor's "turbo" / "plus"). Picker writes to
    *  `extra_params.modelVersion`. */
   supportedModelVersions?: string[];
+  /** Optional model-level metadata for text-chat providers. Kept separate from
+   *  `models` so existing image/video pickers remain compatible. */
+  modelMetadata?: Record<string, CustomProviderChatModelMetadata>;
   extraParams?: Record<string, unknown>;
   note?: string;
 }
 
-function customProviderMediaType(provider: Pick<CustomProviderConfig, 'mediaType' | 'extraParams'>): 'image' | 'video' {
+export function customProviderMediaType(provider: Pick<CustomProviderConfig, 'mediaType' | 'extraParams'>): CustomProviderMediaType {
+  if (provider.mediaType === 'chat' || provider.extraParams?.mediaType === 'chat') {
+    return 'chat';
+  }
   if (provider.mediaType === 'video' || provider.extraParams?.mediaType === 'video') {
     return 'video';
   }
@@ -57,6 +72,10 @@ export function isVideoCustomProvider(provider: Pick<CustomProviderConfig, 'medi
 
 export function isImageCustomProvider(provider: Pick<CustomProviderConfig, 'mediaType' | 'extraParams'>): boolean {
   return customProviderMediaType(provider) === 'image';
+}
+
+export function isChatCustomProvider(provider: Pick<CustomProviderConfig, 'mediaType' | 'extraParams'>): boolean {
+  return customProviderMediaType(provider) === 'chat';
 }
 
 interface CustomProvidersState {
@@ -114,6 +133,7 @@ export const AGNES_PROVIDER_DEFAULTS = {
   imageEndpointPath: '/images/generations',
   videoEndpointPath: '/videos',
   videoStatusEndpointPath: '/videos/{taskId}',
+  chatEndpointPath: '/chat/completions',
   modelListEndpointPath: '/models',
   imageResolutions: ['1k', '2k', '1024x1024', '1536x1024', '1024x1536', 'auto'],
   videoResolutions: ['1k', '2k', '1280x720', '720x1280', '1024x1024'],
@@ -121,6 +141,8 @@ export const AGNES_PROVIDER_DEFAULTS = {
     image21Flash: 'agnes-image-2.1-flash',
     image20Flash: 'agnes-image-2.0-flash',
     video20: 'agnes-video-v2.0',
+    chat20Flash: 'agnes-2.0-flash',
+    chat15Flash: 'agnes-1.5-flash',
   },
 } as const;
 
@@ -195,44 +217,6 @@ export const CUSTOM_PROVIDER_PRESETS: CustomProviderPreset[] = [
         supportedRatios: ['auto', '16:9', '9:16', '1:1', '4:3', '3:4'],
       },
       note: 'Agnes 官方网关：Base URL https://apihub.agnes-ai.com/v1，POST /images/generations，Bearer 鉴权，OpenAI Images-compatible data[].url 响应。',
-    },
-  },
-  {
-    key: 'agnes_video',
-    label: 'Agnes Video v2.0',
-    hint: 'Agnes JSON async video，可按文档修正参数',
-    template: {
-      label: 'Agnes Video',
-      mediaType: 'video',
-      baseUrl: AGNES_PROVIDER_DEFAULTS.baseUrl,
-      endpointPath: AGNES_PROVIDER_DEFAULTS.videoEndpointPath,
-      modelListEndpointPath: AGNES_PROVIDER_DEFAULTS.modelListEndpointPath,
-      httpMethod: 'POST',
-      apiStyle: 'openai-compatible',
-      responseFormat: 'generic',
-      models: [AGNES_PROVIDER_DEFAULTS.models.video20],
-      supportsWebSearch: false,
-      supportedResolutions: [...AGNES_PROVIDER_DEFAULTS.videoResolutions],
-      extraParams: {
-        mediaType: 'video',
-        supportedRatios: ['16:9', '9:16', '1:1'],
-        providerKind: 'agnes-video',
-        requestComposer: 'video-agnes-json',
-        videoRequestBodyMode: 'json',
-        videoTaskIdPath: 'task_id',
-        videoStatusEndpointPath: AGNES_PROVIDER_DEFAULTS.videoStatusEndpointPath,
-        responseVideoPath: 'video_url',
-        videoStatusPath: 'status',
-        videoSuccessValues: ['completed'],
-        videoFailedValues: ['failed'],
-        videoReferenceField: 'image',
-        videoPollTimeoutMs: 15 * 60 * 1000,
-        defaultRequestParams: {
-          frame_rate: 24,
-          negative_prompt: '',
-        },
-      },
-      note: 'Agnes 官方文档为 JSON 异步视频：POST /videos 返回 task_id，GET /videos/{task_id} 返回 status 与 video_url。',
     },
   },
   {

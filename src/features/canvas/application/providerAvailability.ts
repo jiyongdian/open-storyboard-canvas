@@ -1,5 +1,5 @@
 import type { CustomProviderConfig } from '@/stores/customProvidersStore';
-import { isImageCustomProvider } from '@/stores/customProvidersStore';
+import { isChatCustomProvider, isImageCustomProvider } from '@/stores/customProvidersStore';
 import {
   getConfiguredApiKeyCount,
   type ProviderApiKeys,
@@ -85,4 +85,16 @@ export function getConfiguredImageProviderCount({
 
 export function hasConfiguredImageProvider(input: ProviderAvailabilityInput): boolean {
   return getConfiguredImageProviderCount(input) > 0;
+}
+
+export function getConfiguredChatProviderCount({
+  customProviders,
+}: Pick<ProviderAvailabilityInput, 'customProviders'>): number {
+  return customProviders.filter((provider) => (
+    isChatCustomProvider(provider) && hasConfiguredCustomProvider(provider)
+  )).length;
+}
+
+export function hasConfiguredChatProvider(input: Pick<ProviderAvailabilityInput, 'customProviders'>): boolean {
+  return getConfiguredChatProviderCount(input) > 0;
 }

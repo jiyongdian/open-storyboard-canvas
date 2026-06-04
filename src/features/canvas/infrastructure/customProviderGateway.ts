@@ -11,6 +11,7 @@ import {
 } from '@/commands/image';
 import {
   AGNES_PROVIDER_DEFAULTS,
+  isChatCustomProvider,
   isVideoCustomProvider,
   useCustomProvidersStore,
   type CustomProviderConfig,
@@ -119,7 +120,7 @@ interface AsyncTaskConfig {
   timeoutMs: number;
 }
 
-function buildAgnesProviderConfig(mediaType: 'image' | 'video', apiKey: string): CustomProviderConfig {
+function buildAgnesProviderConfig(mediaType: 'image' | 'video' | 'chat', apiKey: string): CustomProviderConfig {
   if (mediaType === 'video') {
     return {
       id: 'agnes',
@@ -161,6 +162,44 @@ function buildAgnesProviderConfig(mediaType: 'image' | 'video', apiKey: string):
     };
   }
 
+  if (mediaType === 'chat') {
+    return {
+      id: 'agnes',
+      label: 'Agnes Chat',
+      mediaType: 'chat',
+      baseUrl: AGNES_PROVIDER_DEFAULTS.baseUrl,
+      endpointPath: AGNES_PROVIDER_DEFAULTS.chatEndpointPath,
+      modelListEndpointPath: AGNES_PROVIDER_DEFAULTS.modelListEndpointPath,
+      httpMethod: 'POST',
+      apiKey,
+      apiStyle: 'openai-compatible',
+      models: [AGNES_PROVIDER_DEFAULTS.models.chat20Flash, AGNES_PROVIDER_DEFAULTS.models.chat15Flash],
+      supportsWebSearch: false,
+      responseFormat: 'generic',
+      modelMetadata: {
+        [AGNES_PROVIDER_DEFAULTS.models.chat20Flash]: {
+          supportsMultimodal: true,
+          contextWindow: null,
+          maxOutputTokens: null,
+          description: 'Agnes 2.0 Flash text chat model',
+        },
+        [AGNES_PROVIDER_DEFAULTS.models.chat15Flash]: {
+          supportsMultimodal: true,
+          contextWindow: null,
+          maxOutputTokens: null,
+          description: 'Agnes 1.5 Flash text chat model',
+        },
+      },
+      extraParams: {
+        providerConfigVersion: 'chat-v1',
+        mediaType: 'chat',
+        providerKind: 'agnes-chat',
+        requestComposer: 'chat-openai-compatible',
+      },
+      note: 'Agnes settings key routed through the OpenAI-compatible chat-completions gateway.',
+    };
+  }
+
   return {
     id: 'agnes',
     label: 'Agnes Image',
@@ -185,11 +224,11 @@ function buildAgnesProviderConfig(mediaType: 'image' | 'video', apiKey: string):
 }
 
 function resolveProviderAndModel(modelId: string): { cfg: CustomProviderConfig; model: string } | null {
-  if (modelId.startsWith('agnes:image:') || modelId.startsWith('agnes:video:')) {
+  if (modelId.startsWith('agnes:image:') || modelId.startsWith('agnes:video:') || modelId.startsWith('agnes:chat:')) {
     const [, mediaType, ...modelParts] = modelId.split(':');
     const model = modelParts.join(':').trim();
     const apiKey = useSettingsStore.getState().agnesApiKey.trim();
-    if (!model || !apiKey || (mediaType !== 'image' && mediaType !== 'video')) return null;
+    if (!model || !apiKey || (mediaType !== 'image' && mediaType !== 'video' && mediaType !== 'chat')) return null;
     return { cfg: buildAgnesProviderConfig(mediaType, apiKey), model };
   }
 
@@ -905,6 +944,42 @@ function buildRequestHeaders(
   return headers;
 }
 
+function chatProviderKind(cfg: CustomProviderConfig): string {
+  return typeof cfg.extraParams?.providerKind === 'string' ? cfg.extraParams.providerKind : '';
+}
+
+function isAnthropicChatProvider(cfg: CustomProviderConfig): boolean {
+  return isChatCustomProvider(cfg) && chatProviderKind(cfg) === 'anthropic-messages';
+}
+
+function isGoogleChatProvider(cfg: CustomProviderConfig): boolean {
+  return isChatCustomProvider(cfg) && chatProviderKind(cfg) === 'google-gemini';
+}
+
+function buildChatRequestHeaders(
+  cfg: CustomProviderConfig,
+  method: 'GET' | 'POST' = 'POST',
+): Record<string, string> {
+  const headers: Record<string, string> = {};
+  if (isAnthropicChatProvider(cfg)) {
+    if (cfg.apiKey?.trim()) {
+      headers['x-api-key'] = cfg.apiKey.trim();
+    }
+    headers['anthropic-version'] = '2023-06-01';
+  } else if (!isGoogleChatProvider(cfg) && cfg.apiKey?.trim()) {
+    headers.Authorization = `Bearer ${cfg.apiKey.trim()}`;
+  }
+  if (method === 'POST') {
+    headers['Content-Type'] = 'application/json';
+  }
+  Object.entries(cfg.extraHeaders ?? {}).forEach(([key, value]) => {
+    const normalizedKey = key.trim();
+    if (!normalizedKey || /^content-type$/i.test(normalizedKey)) return;
+    headers[normalizedKey] = value;
+  });
+  return headers;
+}
+
 function bodyPathMatches(path: string, skipPaths: Set<string>): boolean {
   if (skipPaths.has(path)) return true;
   const normalized = path.replace(/\[(\d+)\]/g, '.$1');
@@ -1031,7 +1106,10 @@ function resolveModernProviderBodyMode(
 
 function resolveModelListUrl(cfg: CustomProviderConfig): string {
   const path = (cfg.modelListEndpointPath ?? '').trim() || '/models';
-  return buildProviderUrl(cfg.baseUrl, path, cfg.queryParams ?? {});
+  return buildProviderUrl(cfg.baseUrl, path, {
+    ...(cfg.queryParams ?? {}),
+    ...(isGoogleChatProvider(cfg) && cfg.apiKey.trim() ? { key: cfg.apiKey.trim() } : {}),
+  });
 }
 
 function resolveModernEndpointPath(cfg: CustomProviderConfig, request: GenerateRequest): string | null {
@@ -2997,6 +3075,7 @@ export interface CustomProviderTestResult {
   ok: boolean;
   status?: number;
   imageUrl?: string;
+  text?: string;
   errorMessage?: string;
   rawPreview?: string;
 }
@@ -3013,7 +3092,7 @@ function extractModelIds(payload: unknown): string[] {
   const ids = new Set<string>();
   const pushString = (value: unknown) => {
     if (typeof value === 'string' && value.trim()) {
-      ids.add(value.trim());
+      ids.add(value.trim().replace(/^models\//, ''));
     }
   };
 
@@ -3025,6 +3104,7 @@ function extractModelIds(payload: unknown): string[] {
         pushString((item as { id?: unknown }).id);
         pushString((item as { name?: unknown }).name);
         pushString((item as { model?: unknown }).model);
+        pushString((item as { baseModelId?: unknown }).baseModelId);
       }
     });
   }
@@ -3041,6 +3121,7 @@ function extractModelIds(payload: unknown): string[] {
             pushString((item as { id?: unknown }).id);
             pushString((item as { name?: unknown }).name);
             pushString((item as { model?: unknown }).model);
+            pushString((item as { baseModelId?: unknown }).baseModelId);
           }
         });
       }
@@ -3061,7 +3142,9 @@ export async function fetchCustomProviderModels(
   }
 
   const url = resolveModelListUrl(cfg);
-  const headers = buildRequestHeaders(cfg, 'json', 'GET');
+  const headers = isChatCustomProvider(cfg)
+    ? buildChatRequestHeaders(cfg, 'GET')
+    : buildRequestHeaders(cfg, 'json', 'GET');
 
   try {
     const { status, parsed, text } = await requestJson(url, {
@@ -3078,6 +3161,144 @@ export async function fetchCustomProviderModels(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { ok: false, models: [], errorMessage: `请求失败：${msg}` };
+  }
+}
+
+function resolveChatEndpointUrl(cfg: CustomProviderConfig, modelName: string): string {
+  const kind = chatProviderKind(cfg);
+  const fallbackPath =
+    kind === 'openai-responses'
+      ? '/v1/responses'
+      : kind === 'anthropic-messages'
+        ? '/v1/messages'
+        : kind === 'google-gemini'
+          ? '/v1beta/models/{model}:generateContent'
+          : '/v1/chat/completions';
+  const path = (cfg.endpointPath ?? '').trim() || fallbackPath;
+  const withModel = buildProviderUrl(normalizeProviderBaseUrl(cfg.baseUrl), path)
+    .replace(/\{model\}/g, encodeURIComponent(modelName))
+    .replace(/\{modelId\}/g, encodeURIComponent(modelName));
+  return appendQueryParams(withModel, {
+    ...(cfg.queryParams ?? {}),
+    ...(isGoogleChatProvider(cfg) && cfg.apiKey.trim() ? { key: cfg.apiKey.trim() } : {}),
+  });
+}
+
+function buildChatConnectivityBody(cfg: CustomProviderConfig, modelName: string): unknown {
+  const prompt = 'Storyboard Copilot connection test. Reply with ok.';
+  const defaultParams = resolveDefaultRequestParams(cfg);
+  const kind = chatProviderKind(cfg);
+  if (kind === 'openai-responses') {
+    return {
+      ...defaultParams,
+      model: modelName,
+      input: prompt,
+    };
+  }
+  if (kind === 'anthropic-messages') {
+    return {
+      ...defaultParams,
+      model: modelName,
+      max_tokens: 32,
+      messages: [{ role: 'user', content: prompt }],
+    };
+  }
+  if (kind === 'google-gemini') {
+    return {
+      ...defaultParams,
+      contents: [
+        {
+          role: 'user',
+          parts: [{ text: prompt }],
+        },
+      ],
+    };
+  }
+  return {
+    ...defaultParams,
+    model: modelName,
+    messages: [{ role: 'user', content: prompt }],
+  };
+}
+
+function textFromUnknown(value: unknown): string | null {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  if (Array.isArray(value)) {
+    const joined = value
+      .map((item) => textFromUnknown(item))
+      .filter((item): item is string => Boolean(item))
+      .join('');
+    return joined.trim() || null;
+  }
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return textFromUnknown(record.text)
+      ?? textFromUnknown(record.content)
+      ?? textFromUnknown(record.output_text)
+      ?? textFromUnknown(record.message);
+  }
+  return null;
+}
+
+function extractOpenAiResponsesText(payload: unknown): string | null {
+  const direct = textFromUnknown(getValueByPath(payload, 'output_text'));
+  if (direct) return direct;
+  const output = getValueByPath(payload, 'output');
+  if (!Array.isArray(output)) return null;
+  for (const item of output) {
+    const content = textFromUnknown(getValueByPath(item, 'content'));
+    if (content) return content;
+  }
+  return null;
+}
+
+function extractChatText(payload: unknown): string | null {
+  return extractOpenAiResponsesText(payload)
+    ?? textFromUnknown(getValueByPath(payload, 'choices[0].message.content'))
+    ?? textFromUnknown(getValueByPath(payload, 'choices[0].text'))
+    ?? textFromUnknown(getValueByPath(payload, 'content'))
+    ?? textFromUnknown(getValueByPath(payload, 'candidates[0].content.parts'))
+    ?? textFromUnknown(getValueByPath(payload, 'candidates[0].content.parts[0].text'))
+    ?? textFromUnknown(getValueByPath(payload, 'text'))
+    ?? textFromUnknown(payload);
+}
+
+export async function testCustomChatProviderConnectivity(
+  cfg: CustomProviderConfig,
+  testModelId?: string,
+): Promise<CustomProviderTestResult> {
+  if (!hasCustomProviderCredential(cfg)) {
+    return { ok: false, errorMessage: '未填写 API Key，无法发起测试请求' };
+  }
+  if (!cfg.baseUrl?.trim()) {
+    return { ok: false, errorMessage: '未填写 API 根地址' };
+  }
+  const modelName = testModelId ?? cfg.models?.[0] ?? 'default';
+  const url = resolveChatEndpointUrl(cfg, modelName);
+  const headers = buildChatRequestHeaders(cfg, 'POST');
+  const body = buildChatConnectivityBody(cfg, modelName);
+  try {
+    const { status, parsed, text } = await requestJson(url, {
+      method: 'POST',
+      headers,
+      bodyMode: 'json',
+      body,
+      timeoutMs: 30000,
+    });
+    const rawPreview = text.slice(0, 300);
+    const extractedText = extractChatText(parsed);
+    if (extractedText) {
+      return { ok: true, status, text: extractedText, rawPreview };
+    }
+    return {
+      ok: false,
+      status,
+      errorMessage: `响应中未找到文本内容。响应预览：${previewPayload(parsed)}`,
+      rawPreview,
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ok: false, errorMessage: `请求失败：${msg}` };
   }
 }
 

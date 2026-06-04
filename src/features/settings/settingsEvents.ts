@@ -3,6 +3,7 @@ export type SettingsCategory =
   | 'providersAdd'
   | 'providersNew'
   | 'providersOld'
+  | 'providersChat'
   | 'customProviders'
   | 'dreamina'
   | 'agnes'

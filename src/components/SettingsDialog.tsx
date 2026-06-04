@@ -47,7 +47,7 @@ const PROJECT_REPOSITORY_URL = 'https://github.com/ganbo-gab/open-storyboard-can
 const ORIGINAL_PROJECT_URL = 'https://github.com/henjicc/Storyboard-Copilot';
 
 function normalizeSettingsCategory(category: SettingsCategory): SettingsCategory {
-  if (category === 'providers' || category === 'providersNew' || category === 'providersOld') {
+  if (category === 'providers' || category === 'providersNew' || category === 'providersOld' || category === 'providersChat') {
     return 'providersAdd';
   }
   return category;
@@ -56,6 +56,9 @@ function normalizeSettingsCategory(category: SettingsCategory): SettingsCategory
 function providerTabFromSettingsCategory(category: SettingsCategory): AddProviderTab {
   if (category === 'providersOld') {
     return 'imageOld';
+  }
+  if (category === 'providersChat') {
+    return 'chat';
   }
   return 'imageNew';
 }
@@ -559,7 +562,7 @@ export function SettingsDialog({
                     mode="list"
                     onRequestAdd={(target) => {
                       setActiveProviderAddTab(
-                        target === 'old' ? 'imageOld' : target === 'video' ? 'video' : 'imageNew'
+                        target === 'old' ? 'imageOld' : target === 'video' ? 'video' : target === 'chat' ? 'chat' : 'imageNew'
                       );
                       setActiveCategory('providersAdd');
                     }}

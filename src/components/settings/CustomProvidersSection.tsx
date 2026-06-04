@@ -4,12 +4,14 @@ import { Copy, CheckCircle2, Trash2, Upload, Plus, Eye, EyeOff, Lightbulb, Save,
 import {
   CUSTOM_PROVIDER_PRESETS,
   CUSTOM_PROVIDER_TUTORIAL_PROMPT,
+  isChatCustomProvider,
   isVideoCustomProvider,
   useCustomProvidersStore,
   type CustomProviderConfig,
 } from '@/stores/customProvidersStore';
 import {
   fetchCustomProviderModels,
+  testCustomChatProviderConnectivity,
   testCustomProviderConnectivity,
   type CustomProviderModelListResult,
   type CustomProviderTestResult,
@@ -33,7 +35,7 @@ interface CustomProvidersSectionProps {
   mode?: SectionMode;
   /** Callback for `list` mode — lets the host switch the sidebar to the add tab
    *  when the user clicks "+ 新增配置" from an empty list. */
-  onRequestAdd?: (target?: 'new' | 'old' | 'video') => void;
+  onRequestAdd?: (target?: 'new' | 'old' | 'video' | 'chat') => void;
 }
 
 const PRESET_RATIOS = ['21:9', '16:9', '4:1', '3:2', '4:3', '1:1', '3:4', '2:3', '9:16', '2:1'] as const;
@@ -119,6 +121,12 @@ function providerKindLabel(provider: CustomProviderConfig): {
   label: string;
   className: string;
 } {
+  if (isChatCustomProvider(provider)) {
+    return {
+      label: '文本对话',
+      className: 'border-violet-500/30 bg-violet-500/10 text-violet-300',
+    };
+  }
   if (isVideoCustomProvider(provider)) {
     return {
       label: '视频配置',
@@ -460,7 +468,9 @@ export const CustomProvidersSection = memo(({ mode = 'both', onRequestAdd }: Cus
     setTestingProviderId(provider.id);
     setProviderTestResults((results) => ({ ...results, [provider.id]: undefined }));
     try {
-      const res = await testCustomProviderConnectivity(provider);
+      const res = isChatCustomProvider(provider)
+        ? await testCustomChatProviderConnectivity(provider)
+        : await testCustomProviderConnectivity(provider);
       setProviderTestResults((results) => ({ ...results, [provider.id]: res }));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -726,7 +736,7 @@ export const CustomProvidersSection = memo(({ mode = 'both', onRequestAdd }: Cus
     }
     if (mode === 'list') {
       setPendingEditId(id);
-      onRequestAdd?.(isVideoCustomProvider(p) ? 'video' : (isModernProviderConfig(p) ? 'new' : 'old'));
+      onRequestAdd?.(isChatCustomProvider(p) ? 'chat' : isVideoCustomProvider(p) ? 'video' : (isModernProviderConfig(p) ? 'new' : 'old'));
     }
   }, [providers, mode, onRequestAdd, setPendingEditId]);
 
@@ -1629,6 +1639,7 @@ export const CustomProvidersSection = memo(({ mode = 'both', onRequestAdd }: Cus
                 {(() => {
                   const savedTestResult = providerTestResults[p.id];
                   const isTestingThisProvider = testingProviderId === p.id;
+                  const isChat = isChatCustomProvider(p);
                   const isVideo = isVideoCustomProvider(p);
                   const kind = providerKindLabel(p);
                   return (
@@ -1642,7 +1653,8 @@ export const CustomProvidersSection = memo(({ mode = 'both', onRequestAdd }: Cus
                     </div>
                     <div className="mt-0.5 text-[11px] text-text-muted truncate font-mono">{p.baseUrl || '(未填 baseUrl)'}</div>
                     <div className="mt-0.5 text-[10px] text-text-muted">
-                      接口：{p.apiStyle} · 请求 {formatBodyModeLabel(resolveCustomProviderBodyMode(p))} · 模型 {p.models.length} 个 · {p.supportsWebSearch ? '支持联网' : '不支持联网'}
+                      接口：{p.apiStyle} · 请求 {isChat ? 'JSON 对话' : formatBodyModeLabel(resolveCustomProviderBodyMode(p))} · 模型 {p.models.length} 个
+                      {!isChat && <> · {p.supportsWebSearch ? '支持联网' : '不支持联网'}</>}
                     </div>
                     {p.note && <div className="mt-1 text-[10px] text-text-muted/70 italic truncate">ⓘ {p.note}</div>}
                     {savedTestResult && (
@@ -1662,7 +1674,7 @@ export const CustomProvidersSection = memo(({ mode = 'both', onRequestAdd }: Cus
                       onClick={() => { void handleTestSavedProvider(p); }}
                       disabled={isVideo || isTestingThisProvider || !p.apiKey.trim() || !p.baseUrl.trim()}
                       className="inline-flex items-center gap-1 rounded-md bg-white/5 px-2.5 py-1 text-[11px] text-text-dark hover:bg-white/10 disabled:opacity-40"
-                      title={isVideo ? '视频配置暂不走图片连通测试' : '用这条已保存配置发一次测试请求'}
+                      title={isVideo ? '视频配置暂不走图片连通测试' : isChat ? '用这条已保存配置发一次文本对话测试请求' : '用这条已保存配置发一次测试请求'}
                     >
                       {isTestingThisProvider ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plug className="h-3 w-3" />}
                       {isTestingThisProvider ? '测试中' : '测试连通'}
@@ -1735,7 +1747,37 @@ export const CustomProvidersSection = memo(({ mode = 'both', onRequestAdd }: Cus
                 )}
               </div>
               <div>
-                {isVideoCustomProvider(modelsDialogProvider) ? (
+                {isChatCustomProvider(modelsDialogProvider) ? (
+                  <>
+                    <div className="text-text-muted mb-1">对话模型元数据</div>
+                    <div className="space-y-1.5">
+                      {modelsDialogProvider.models.length === 0 ? (
+                        <div className="text-text-muted/70">（暂无模型元数据）</div>
+                      ) : modelsDialogProvider.models.map((modelId) => {
+                        const metadata = modelsDialogProvider.modelMetadata?.[modelId] ?? {};
+                        return (
+                          <div key={modelId} className="rounded bg-bg-dark px-2 py-1.5 text-[11px] text-text-dark">
+                            <div className="font-mono">{modelId}</div>
+                            <div className="mt-1 flex flex-wrap gap-1 text-text-muted">
+                              <span className="rounded border border-border-dark px-1.5 py-0.5">
+                                {metadata.supportsMultimodal ? '支持多模态' : '纯文本'}
+                              </span>
+                              <span className="rounded border border-border-dark px-1.5 py-0.5">
+                                上下文 {metadata.contextWindow ?? '未填'}
+                              </span>
+                              <span className="rounded border border-border-dark px-1.5 py-0.5">
+                                最大输出 {metadata.maxOutputTokens ?? '未填'}
+                              </span>
+                            </div>
+                            {metadata.description && (
+                              <div className="mt-1 text-text-muted">{metadata.description}</div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
+                ) : isVideoCustomProvider(modelsDialogProvider) ? (
                   <>
                     <div className="text-text-muted mb-1">支持秒数</div>
                     <div className="flex flex-wrap gap-1">
@@ -1765,17 +1807,21 @@ export const CustomProvidersSection = memo(({ mode = 'both', onRequestAdd }: Cus
                   </div>
                 </div>
               )}
-              <div>
-                <div className="text-text-muted mb-1">联网搜索</div>
-                <div className="text-text-dark">{modelsDialogProvider.supportsWebSearch ? '支持 ✓' : '不支持'}</div>
-              </div>
+              {!isChatCustomProvider(modelsDialogProvider) && (
+                <div>
+                  <div className="text-text-muted mb-1">联网搜索</div>
+                  <div className="text-text-dark">{modelsDialogProvider.supportsWebSearch ? '支持 ✓' : '不支持'}</div>
+                </div>
+              )}
               <div>
                 <div className="text-text-muted mb-1">接口风格</div>
                 <code className="rounded bg-bg-dark px-2 py-0.5 text-[11px] text-text-dark">{modelsDialogProvider.apiStyle}</code>
               </div>
               <div>
                 <div className="text-text-muted mb-1">请求格式</div>
-                <code className="rounded bg-bg-dark px-2 py-0.5 text-[11px] text-text-dark">{formatBodyModeLabel(resolveCustomProviderBodyMode(modelsDialogProvider))}</code>
+                <code className="rounded bg-bg-dark px-2 py-0.5 text-[11px] text-text-dark">
+                  {isChatCustomProvider(modelsDialogProvider) ? 'JSON 对话' : formatBodyModeLabel(resolveCustomProviderBodyMode(modelsDialogProvider))}
+                </code>
               </div>
               {formatImportPlanPreview(modelsDialogProvider.extraParams) && (
                 <details className="rounded-lg border border-border-dark bg-bg-dark p-3">

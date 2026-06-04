@@ -1,11 +1,12 @@
 import { memo } from 'react';
-import { Image, Layers, Video } from 'lucide-react';
+import { Image, Layers, MessageSquareText, Video } from 'lucide-react';
 
+import { ChatProvidersSection } from '@/components/settings/ChatProvidersSection';
 import { CustomProvidersSection } from '@/components/settings/CustomProvidersSection';
 import { ModernProvidersSection } from '@/components/settings/ModernProvidersSection';
 import { VideoProvidersSection } from '@/components/settings/VideoProvidersSection';
 
-export type AddProviderTab = 'imageNew' | 'imageOld' | 'video';
+export type AddProviderTab = 'imageNew' | 'imageOld' | 'video' | 'chat';
 
 interface AddProvidersSectionProps {
   activeTab: AddProviderTab;
@@ -36,6 +37,12 @@ const TABS: Array<{
     description: 'OpenAI Videos API 兼容供应商配置',
     icon: Video,
   },
+  {
+    id: 'chat',
+    label: '文本对话',
+    description: 'Responses、Chat Completions、Anthropic、Gemini',
+    icon: MessageSquareText,
+  },
 ];
 
 export const AddProvidersSection = memo(function AddProvidersSection({
@@ -47,11 +54,11 @@ export const AddProvidersSection = memo(function AddProvidersSection({
       <div>
         <h2 className="text-base font-semibold text-text-dark">添加供应商</h2>
         <p className="mt-1 text-xs leading-5 text-text-muted">
-          按生成类型选择配置入口。图片新/老配置会继续沿用现有功能；视频配置先保存 OpenAI Videos API 兼容参数，供后续视频生成调用层读取。
+          按生成类型选择配置入口。图片新/老配置会继续沿用现有功能；视频和文本对话配置先保存参数，供后续调用层读取。
         </p>
       </div>
 
-      <div className="grid grid-cols-3 gap-2">
+      <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
         {TABS.map((tab) => {
           const Icon = tab.icon;
           const selected = activeTab === tab.id;
@@ -79,6 +86,7 @@ export const AddProvidersSection = memo(function AddProvidersSection({
       {activeTab === 'imageNew' && <ModernProvidersSection />}
       {activeTab === 'imageOld' && <CustomProvidersSection mode="add" />}
       {activeTab === 'video' && <VideoProvidersSection />}
+      {activeTab === 'chat' && <ChatProvidersSection />}
     </div>
   );
 });

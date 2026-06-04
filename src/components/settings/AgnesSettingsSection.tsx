@@ -6,6 +6,16 @@ import { useSettingsStore } from '@/stores/settingsStore';
 
 const AGNES_DOCS = [
   {
+    title: 'Agnes 2.0 Flash',
+    url: 'https://agnes-ai.com/doc/agnes-20-flash',
+    note: '文本对话模型说明。后续 chat 调用层可读取这里保存的 Agnes Key。',
+  },
+  {
+    title: 'Agnes 1.5 Flash',
+    url: 'https://agnes-ai.com/doc/agnes-15-flash',
+    note: '文本对话模型说明。当前已作为 Agnes Chat 默认模型展示。',
+  },
+  {
     title: 'Agnes Image 2.1 Flash',
     url: 'https://agnes-ai.com/doc/agnes-image-21-flash',
     note: '图片生成模型说明。后续图片调用层可读取这里保存的 Agnes Key。',
@@ -43,7 +53,7 @@ export const AgnesSettingsSection = memo(function AgnesSettingsSection() {
       <div>
         <h2 className="text-base font-semibold text-text-dark">Agnes</h2>
         <p className="mt-1 text-xs leading-5 text-text-muted">
-          独立管理 Agnes Key，并保留图片 / 视频模型说明入口。当前不会自动改动现有图片供应商配置。
+          独立管理 Agnes Key，并保留文本 / 图片 / 视频模型说明入口。当前不会自动改动现有图片供应商配置。
         </p>
       </div>
 
@@ -78,7 +88,7 @@ export const AgnesSettingsSection = memo(function AgnesSettingsSection() {
         )}
       </div>
 
-      <div className="grid grid-cols-3 gap-3">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
         {AGNES_DOCS.map((doc) => (
           <button
             key={doc.url}
@@ -96,7 +106,7 @@ export const AgnesSettingsSection = memo(function AgnesSettingsSection() {
       </div>
 
       <div className="rounded-lg border border-dashed border-border-dark bg-bg-dark/50 p-3 text-[11px] leading-5 text-text-muted">
-        Agnes 文档页面当前由前端渲染，静态正文不稳定；这里先保存独立 key 与模型说明入口，后续后端 / 前端调用层可通过 `settingsStore.agnesApiKey` 读取。
+        Agnes 文档页面当前由前端渲染，静态正文不稳定；这里先保存独立 key 与文本 / 图片 / 视频模型说明入口，后续后端 / 前端调用层可通过 `settingsStore.agnesApiKey` 读取。
       </div>
     </div>
   );

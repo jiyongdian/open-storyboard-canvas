@@ -2,7 +2,6 @@ import { memo, useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Plus, Save, Trash2 } from 'lucide-react';
 
 import {
-  AGNES_PROVIDER_DEFAULTS,
   isVideoCustomProvider,
   useCustomProvidersStore,
   type CustomProviderConfig,
@@ -129,41 +128,6 @@ const VIDEO_PROVIDER_TEMPLATES: VideoProviderTemplate[] = [
       },
     },
     note: 'Google Veo 使用 Gemini long-running operation：POST /models/{model}:predictLongRunning 并轮询 operation name。当前模板保留真实字段元数据，但需要后续专用 gateway 组装 instances/config，不会伪装成 OpenAI Videos。',
-  },
-  {
-    key: 'agnes',
-    label: 'Agnes Video',
-    hint: 'Agnes JSON 异步视频接口',
-    labelValue: 'Agnes Video',
-    baseUrl: AGNES_PROVIDER_DEFAULTS.baseUrl,
-    endpointPath: AGNES_PROVIDER_DEFAULTS.videoEndpointPath,
-    modelListEndpointPath: AGNES_PROVIDER_DEFAULTS.modelListEndpointPath,
-    apiStyle: 'openai-compatible',
-    models: [
-      { id: AGNES_PROVIDER_DEFAULTS.models.video20, description: 'Agnes Video v2.0' },
-    ],
-    durations: DEFAULT_DURATIONS,
-    aspectRatios: DEFAULT_ASPECT_RATIOS,
-    resolutions: [...AGNES_PROVIDER_DEFAULTS.videoResolutions],
-    extraParams: {
-      providerKind: 'agnes-video',
-      requestComposer: 'video-agnes-json',
-      videoRequestBodyMode: 'json',
-      videoTaskIdPath: 'task_id',
-      videoStatusEndpointPath: AGNES_PROVIDER_DEFAULTS.videoStatusEndpointPath,
-      responseVideoPath: 'video_url',
-      videoStatusPath: 'status',
-      videoPendingValues: ['queued', 'in_progress'],
-      videoSuccessValues: ['completed'],
-      videoFailedValues: ['failed'],
-      videoReferenceField: 'image',
-      videoPollTimeoutMs: 15 * 60 * 1000,
-      defaultRequestParams: {
-        frame_rate: 24,
-        negative_prompt: '',
-      },
-    },
-    note: 'Agnes 官方网关：POST /videos 返回 task_id，GET /videos/{task_id} 轮询 status，完成后读取 video_url。请求体使用 JSON，num_frames 会按 8n+1 约束自动归一化。',
   },
   {
     key: 'seedance',
