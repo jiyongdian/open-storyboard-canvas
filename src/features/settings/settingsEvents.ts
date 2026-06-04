@@ -11,6 +11,7 @@ export type SettingsCategory =
   | 'promptPresets'
   | 'appearance'
   | 'general'
+  | 'keybindings'
   | 'about';
 
 interface OpenSettingsEventDetail {

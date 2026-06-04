@@ -1,10 +1,19 @@
 import { useState, useCallback, useEffect, useMemo } from 'react';
-import { X, FolderOpen, Plus, Trash2, CheckCircle2, ExternalLink } from 'lucide-react';
+import { X, FolderOpen, Plus, Trash2, CheckCircle2, ExternalLink, RotateCcw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { getVersion } from '@tauri-apps/api/app';
 import { open } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { useSettingsStore, type PanoramaControlSensitivity } from '@/stores/settingsStore';
+import {
+  DEFAULT_CANVAS_MOUSE_BINDINGS,
+  TRADITIONAL_CANVAS_MOUSE_BINDINGS,
+  useSettingsStore,
+  type CanvasMouseAction,
+  type CanvasMouseBindingPreset,
+  type CanvasMouseBindingSlot,
+  type CanvasMouseBindings,
+  type PanoramaControlSensitivity,
+} from '@/stores/settingsStore';
 import { UiCheckbox, UiSelect } from '@/components/ui';
 import { UI_CONTENT_OVERLAY_INSET_CLASS, UI_DIALOG_TRANSITION_MS } from '@/components/ui/motion';
 import { useDialogTransition } from '@/components/ui/useDialogTransition';
@@ -45,6 +54,21 @@ void _UNUSED_PROVIDER_URLS_KEPT_FOR_FUTURE_USE;
 
 const PROJECT_REPOSITORY_URL = 'https://github.com/ganbo-gab/open-storyboard-canvas';
 const ORIGINAL_PROJECT_URL = 'https://github.com/henjicc/Storyboard-Copilot';
+const CANVAS_MOUSE_BINDING_SLOTS: CanvasMouseBindingSlot[] = [
+  'leftClick',
+  'leftDrag',
+  'rightClick',
+  'rightDrag',
+  'middleClick',
+  'middleDrag',
+];
+const CANVAS_MOUSE_ACTIONS: CanvasMouseAction[] = [
+  'none',
+  'selectNode',
+  'panCanvas',
+  'selectionBox',
+  'nodeMenu',
+];
 
 function normalizeSettingsCategory(category: SettingsCategory): SettingsCategory {
   if (category === 'providers' || category === 'providersNew' || category === 'providersOld' || category === 'providersChat') {
@@ -121,6 +145,10 @@ export function SettingsDialog({
     showStoryboardGenAdvancedRatioControls,
     useLegacyPanoramaControlDirection,
     panoramaControlSensitivity,
+    canvasMouseBindingPreset,
+    canvasMouseBindings,
+    enableCanvasWasdPan,
+    canvasWasdPanSensitivity,
     uiRadiusPreset,
     themeTonePreset,
     accentColor,
@@ -142,6 +170,10 @@ export function SettingsDialog({
     setShowStoryboardGenAdvancedRatioControls,
     setUseLegacyPanoramaControlDirection,
     setPanoramaControlSensitivity,
+    setCanvasMouseBindingPreset,
+    setCanvasMouseBindings,
+    setEnableCanvasWasdPan,
+    setCanvasWasdPanSensitivity,
     setUiRadiusPreset,
     setThemeTonePreset,
     setAccentColor,
@@ -196,6 +228,14 @@ export function SettingsDialog({
     useState(useLegacyPanoramaControlDirection);
   const [localPanoramaControlSensitivity, setLocalPanoramaControlSensitivity] =
     useState<PanoramaControlSensitivity>(panoramaControlSensitivity);
+  const [localCanvasMouseBindingPreset, setLocalCanvasMouseBindingPreset] =
+    useState<CanvasMouseBindingPreset>(canvasMouseBindingPreset);
+  const [localCanvasMouseBindings, setLocalCanvasMouseBindings] =
+    useState<CanvasMouseBindings>(canvasMouseBindings);
+  const [localEnableCanvasWasdPan, setLocalEnableCanvasWasdPan] =
+    useState(enableCanvasWasdPan);
+  const [localCanvasWasdPanSensitivity, setLocalCanvasWasdPanSensitivity] =
+    useState(canvasWasdPanSensitivity);
   const [localUiRadiusPreset, setLocalUiRadiusPreset] = useState(uiRadiusPreset);
   const [localThemeTonePreset, setLocalThemeTonePreset] = useState(themeTonePreset);
   const [localAccentColor, setLocalAccentColor] = useState(accentColor);
@@ -247,6 +287,10 @@ export function SettingsDialog({
     setLocalShowStoryboardGenAdvancedRatioControls(showStoryboardGenAdvancedRatioControls);
     setLocalUseLegacyPanoramaControlDirection(useLegacyPanoramaControlDirection);
     setLocalPanoramaControlSensitivity(panoramaControlSensitivity);
+    setLocalCanvasMouseBindingPreset(canvasMouseBindingPreset);
+    setLocalCanvasMouseBindings(canvasMouseBindings);
+    setLocalEnableCanvasWasdPan(enableCanvasWasdPan);
+    setLocalCanvasWasdPanSensitivity(canvasWasdPanSensitivity);
     setLocalUiRadiusPreset(uiRadiusPreset);
     setLocalThemeTonePreset(themeTonePreset);
     setLocalAccentColor(accentColor);
@@ -286,6 +330,13 @@ export function SettingsDialog({
     setShowStoryboardGenAdvancedRatioControls(localShowStoryboardGenAdvancedRatioControls);
     setUseLegacyPanoramaControlDirection(localUseLegacyPanoramaControlDirection);
     setPanoramaControlSensitivity(localPanoramaControlSensitivity);
+    if (localCanvasMouseBindingPreset === 'custom') {
+      setCanvasMouseBindings(localCanvasMouseBindings);
+    } else {
+      setCanvasMouseBindingPreset(localCanvasMouseBindingPreset);
+    }
+    setEnableCanvasWasdPan(localEnableCanvasWasdPan);
+    setCanvasWasdPanSensitivity(localCanvasWasdPanSensitivity);
     setUiRadiusPreset(localUiRadiusPreset);
     setThemeTonePreset(localThemeTonePreset);
     setAccentColor(localAccentColor);
@@ -310,6 +361,10 @@ export function SettingsDialog({
     localShowStoryboardGenAdvancedRatioControls,
     localUseLegacyPanoramaControlDirection,
     localPanoramaControlSensitivity,
+    localCanvasMouseBindingPreset,
+    localCanvasMouseBindings,
+    localEnableCanvasWasdPan,
+    localCanvasWasdPanSensitivity,
     localUiRadiusPreset,
     localThemeTonePreset,
     localAccentColor,
@@ -332,6 +387,10 @@ export function SettingsDialog({
     setShowStoryboardGenAdvancedRatioControls,
     setUseLegacyPanoramaControlDirection,
     setPanoramaControlSensitivity,
+    setCanvasMouseBindingPreset,
+    setCanvasMouseBindings,
+    setEnableCanvasWasdPan,
+    setCanvasWasdPanSensitivity,
     setUiRadiusPreset,
     setThemeTonePreset,
     setAccentColor,
@@ -396,6 +455,26 @@ export function SettingsDialog({
     setLocalDownloadPresetPaths((previous) => previous.filter((value) => value !== path));
   }, []);
 
+  const handleCanvasMousePresetChange = useCallback((preset: CanvasMouseBindingPreset) => {
+    setLocalCanvasMouseBindingPreset(preset);
+    if (preset === 'default') {
+      setLocalCanvasMouseBindings({ ...DEFAULT_CANVAS_MOUSE_BINDINGS });
+    } else if (preset === 'traditional') {
+      setLocalCanvasMouseBindings({ ...TRADITIONAL_CANVAS_MOUSE_BINDINGS });
+    }
+  }, []);
+
+  const handleCanvasMouseBindingChange = useCallback(
+    (slot: CanvasMouseBindingSlot, action: CanvasMouseAction) => {
+      setLocalCanvasMouseBindingPreset('custom');
+      setLocalCanvasMouseBindings((previous) => ({
+        ...previous,
+        [slot]: action,
+      }));
+    },
+    []
+  );
+
   if (!shouldRender) return null;
 
   return (
@@ -437,6 +516,20 @@ export function SettingsDialog({
               `}
               >
                 <span className="text-sm">{t('settings.general')}</span>
+              </button>
+
+              <button
+                onClick={() => setActiveCategory('keybindings')}
+                className={`
+                w-full flex items-center gap-3 px-4 py-2.5 text-left
+                transition-colors
+                ${activeCategory === 'keybindings'
+                    ? 'bg-accent/10 text-text-dark border-l-2 border-accent'
+                    : 'text-text-muted hover:bg-bg-dark hover:text-text-dark'
+                  }
+              `}
+              >
+                <span className="text-sm">{t('settings.keybindings')}</span>
               </button>
 
               <button
@@ -752,7 +845,146 @@ export function SettingsDialog({
                 </div>
 
                 <div className="flex justify-end gap-2 border-t border-border-dark px-6 py-4">
-                  {settingsSaved && <span className="mr-auto inline-flex items-center gap-1 text-xs text-emerald-400"><CheckCircle2 className="h-3.5 w-3.5" /> 已保存</span>}
+                  {settingsSaved && <span className="mr-auto inline-flex items-center gap-1 text-xs text-emerald-400"><CheckCircle2 className="h-3.5 w-3.5" /> {t('common.saved')}</span>}
+                  <button
+                    onClick={onClose}
+                    className="rounded border border-border-dark px-4 py-2 text-sm font-medium text-text-dark transition-colors hover:bg-bg-dark"
+                  >
+                    {t('common.close')}
+                  </button>
+                  <button
+                    onClick={handleSave}
+                    className="rounded bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent/80"
+                  >
+                    {t('common.save')}
+                  </button>
+                </div>
+              </>
+            )}
+
+            {activeCategory === 'keybindings' && (
+              <>
+                <div className="px-6 py-5 border-b border-border-dark">
+                  <h2 className="text-lg font-semibold text-text-dark">
+                    {t('settings.keybindings')}
+                  </h2>
+                  <p className="text-sm text-text-muted mt-1">
+                    {t('settings.keybindingsDesc')}
+                  </p>
+                </div>
+
+                <div className="ui-scrollbar flex-1 space-y-4 overflow-y-auto p-6">
+                  <div className="rounded-lg border border-border-dark bg-bg-dark p-4">
+                    <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <h3 className="text-sm font-medium text-text-dark">
+                          {t('settings.canvasInteraction.title')}
+                        </h3>
+                        <p className="mt-1 text-xs text-text-muted">
+                          {t('settings.canvasInteraction.desc')}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="inline-flex h-8 items-center gap-1.5 rounded border border-border-dark bg-surface-dark px-2.5 text-xs text-text-dark transition-colors hover:bg-bg-dark"
+                        onClick={() => handleCanvasMousePresetChange('default')}
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        {t('settings.canvasInteraction.resetDefault')}
+                      </button>
+                    </div>
+
+                    <div className="mb-4 grid gap-3 sm:grid-cols-[minmax(0,220px)_1fr]">
+                      <label className="text-xs font-medium text-text-muted">
+                        {t('settings.canvasInteraction.preset')}
+                        <UiSelect
+                          value={localCanvasMouseBindingPreset}
+                          onChange={(event) =>
+                            handleCanvasMousePresetChange(
+                              event.target.value as CanvasMouseBindingPreset
+                            )
+                          }
+                          className="mt-1"
+                          aria-label={t('settings.canvasInteraction.preset')}
+                        >
+                          <option value="default">
+                            {t('settings.canvasInteraction.presets.default')}
+                          </option>
+                          <option value="traditional">
+                            {t('settings.canvasInteraction.presets.traditional')}
+                          </option>
+                          <option value="custom">
+                            {t('settings.canvasInteraction.presets.custom')}
+                          </option>
+                        </UiSelect>
+                      </label>
+                      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                        {CANVAS_MOUSE_BINDING_SLOTS.map((slot) => (
+                          <label key={slot} className="text-xs font-medium text-text-muted">
+                            {t(`settings.canvasInteraction.slots.${slot}`)}
+                            <UiSelect
+                              value={localCanvasMouseBindings[slot]}
+                              onChange={(event) =>
+                                handleCanvasMouseBindingChange(
+                                  slot,
+                                  event.target.value as CanvasMouseAction
+                                )
+                              }
+                              className="mt-1"
+                              aria-label={t(`settings.canvasInteraction.slots.${slot}`)}
+                            >
+                              {CANVAS_MOUSE_ACTIONS.map((action) => (
+                                <option key={action} value={action}>
+                                  {t(`settings.canvasInteraction.actions.${action}`)}
+                                </option>
+                              ))}
+                            </UiSelect>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="rounded-md border border-border-dark bg-surface-dark/60 p-3">
+                      <div className="flex items-start gap-3">
+                        <UiCheckbox
+                          checked={localEnableCanvasWasdPan}
+                          onCheckedChange={setLocalEnableCanvasWasdPan}
+                          className="mt-0.5 shrink-0"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <h4 className="text-sm font-medium text-text-dark">
+                            {t('settings.canvasInteraction.wasdPan')}
+                          </h4>
+                          <p className="mt-1 text-xs text-text-muted">
+                            {t('settings.canvasInteraction.wasdPanDesc')}
+                          </p>
+                          <div className="mt-3 flex flex-wrap items-center gap-3">
+                            <input
+                              type="range"
+                              min={10}
+                              max={180}
+                              step={5}
+                              value={localCanvasWasdPanSensitivity}
+                              onChange={(event) =>
+                                setLocalCanvasWasdPanSensitivity(Number(event.target.value))
+                              }
+                              className="w-48 accent-accent"
+                              aria-label={t('settings.canvasInteraction.wasdSensitivity')}
+                            />
+                            <span className="text-xs text-text-muted">
+                              {t('settings.canvasInteraction.wasdSensitivityValue', {
+                                value: localCanvasWasdPanSensitivity,
+                              })}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 border-t border-border-dark px-6 py-4">
+                  {settingsSaved && <span className="mr-auto inline-flex items-center gap-1 text-xs text-emerald-400"><CheckCircle2 className="h-3.5 w-3.5" /> {t('common.saved')}</span>}
                   <button
                     onClick={onClose}
                     className="rounded border border-border-dark px-4 py-2 text-sm font-medium text-text-dark transition-colors hover:bg-bg-dark"
@@ -945,7 +1177,7 @@ export function SettingsDialog({
                 </div>
 
                 <div className="flex justify-end gap-2 border-t border-border-dark px-6 py-4">
-                  {settingsSaved && <span className="mr-auto inline-flex items-center gap-1 text-xs text-emerald-400"><CheckCircle2 className="h-3.5 w-3.5" /> 已保存</span>}
+                  {settingsSaved && <span className="mr-auto inline-flex items-center gap-1 text-xs text-emerald-400"><CheckCircle2 className="h-3.5 w-3.5" /> {t('common.saved')}</span>}
                   <button
                     onClick={onClose}
                     className="rounded border border-border-dark px-4 py-2 text-sm font-medium text-text-dark transition-colors hover:bg-bg-dark"
@@ -1068,7 +1300,7 @@ export function SettingsDialog({
                 </div>
 
                 <div className="flex justify-end border-t border-border-dark px-6 py-4">
-                  {settingsSaved && <span className="mr-auto inline-flex items-center gap-1 text-xs text-emerald-400"><CheckCircle2 className="h-3.5 w-3.5" /> 已保存</span>}
+                  {settingsSaved && <span className="mr-auto inline-flex items-center gap-1 text-xs text-emerald-400"><CheckCircle2 className="h-3.5 w-3.5" /> {t('common.saved')}</span>}
                   <div className="flex gap-2">
                     <button
                       onClick={onClose}

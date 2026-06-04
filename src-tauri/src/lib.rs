@@ -193,6 +193,7 @@ pub fn run() {
             image::save_video_source_to_directory,
             image::save_image_source_to_app_debug_dir,
             image::copy_image_source_to_clipboard,
+            image::read_system_clipboard,
             ai_commands::set_api_key,
             ai_commands::submit_generate_image_job,
             ai_commands::get_generate_image_job,

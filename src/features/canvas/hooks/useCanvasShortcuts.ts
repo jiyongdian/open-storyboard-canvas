@@ -1,15 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 
-import type {
-  CanvasEdge,
-  CanvasNode,
-} from '@/features/canvas/domain/canvasNodes';
+import type { CanvasNode } from '@/features/canvas/domain/canvasNodes';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
-
-interface ClipboardSnapshot {
-  nodes: CanvasNode[];
-  edges: CanvasEdge[];
-}
 
 function isTypingTarget(target: EventTarget | null): boolean {
   const element = target as HTMLElement | null;
@@ -52,7 +44,6 @@ export function resolveClipboardImageFile(event: ClipboardEvent): File | null {
 
 export interface UseCanvasShortcutsArgs {
   nodes: CanvasNode[];
-  edges: CanvasEdge[];
   selectedNodeId: string | null;
   selectedNodeIds: string[];
   /** When the only selected node is an UploadNode, paste-image goes to
@@ -67,10 +58,10 @@ export interface UseCanvasShortcutsArgs {
   groupNodes: (nodeIds: string[]) => string | null;
   deleteNode: (nodeId: string) => void;
   deleteNodes: (nodeIds: string[]) => void;
-  /** Implementation lives in Canvas.tsx because it needs access to many
-   *  Canvas-local helpers (size measurement, position resolution). The
-   *  hook just needs a stable callable to dispatch through. */
-  duplicateNodes: (sourceNodeIds: string[]) => string | null;
+  copyNodesToClipboard: (sourceNodeIds: string[]) => void;
+  pasteFromShortcut: () => boolean | Promise<boolean>;
+  hasFreshInternalClipboard: () => boolean;
+  markSystemClipboardFresh: () => void;
   pasteImageAtCanvasPosition?: (file: File) => void | Promise<void>;
 }
 
@@ -88,17 +79,15 @@ export interface UseCanvasShortcutsArgs {
  *     fires its node-duplication path. Without the flag we'd both
  *     drop the image into the upload node AND duplicate any cached
  *     nodes from a prior copy.
- *   • `copiedSnapshotRef` is a ref (not state) so a re-render between
- *     copy and paste doesn't reset the buffer.
- *   • `duplicateNodesRef` is a ref to a stable callable so the
- *     keydown effect can be set up once instead of re-binding every
- *     time `duplicateNodes`'s identity changes (which would happen on
- *     every nodes/edges change).
+ *   • A fresh internal canvas copy wins over the system clipboard. We
+ *     prevent the native paste event in that case so stale system images
+ *     cannot race with node duplication.
+ *   • Copy/paste node state lives in Canvas.tsx so keyboard shortcuts
+ *     and context menus share one internal clipboard.
  */
 export function useCanvasShortcuts(args: UseCanvasShortcutsArgs): void {
   const {
     nodes,
-    edges,
     selectedNodeId,
     selectedNodeIds,
     selectedUploadNodeId,
@@ -108,20 +97,14 @@ export function useCanvasShortcuts(args: UseCanvasShortcutsArgs): void {
     groupNodes,
     deleteNode,
     deleteNodes,
-    duplicateNodes,
+    copyNodesToClipboard,
+    pasteFromShortcut,
+    hasFreshInternalClipboard,
+    markSystemClipboardFresh,
     pasteImageAtCanvasPosition,
   } = args;
 
-  const copiedSnapshotRef = useRef<ClipboardSnapshot | null>(null);
   const pasteImageHandledRef = useRef(false);
-  const duplicateNodesRef = useRef<((sourceNodeIds: string[]) => string | null) | null>(null);
-
-  // Keep the ref pointing at the latest duplicateNodes implementation
-  // without making the keyboard effect depend on it (which would
-  // re-bind document listeners on every nodes/edges change).
-  useEffect(() => {
-    duplicateNodesRef.current = duplicateNodes;
-  }, [duplicateNodes]);
 
   // Forward image-bearing clipboard events to the selected upload node or,
   // when no upload node is selected, to the canvas-level paste handler.
@@ -134,6 +117,11 @@ export function useCanvasShortcuts(args: UseCanvasShortcutsArgs): void {
         return;
       }
 
+      if (hasFreshInternalClipboard()) {
+        event.preventDefault();
+        return;
+      }
+
       const imageFile = resolveClipboardImageFile(event);
       if (!imageFile) {
         return;
@@ -141,6 +129,7 @@ export function useCanvasShortcuts(args: UseCanvasShortcutsArgs): void {
 
       event.preventDefault();
       pasteImageHandledRef.current = true;
+      markSystemClipboardFresh();
       if (selectedUploadNodeId) {
         canvasEventBus.publish('upload-node/paste-image', {
           nodeId: selectedUploadNodeId,
@@ -156,14 +145,18 @@ export function useCanvasShortcuts(args: UseCanvasShortcutsArgs): void {
     return () => {
       document.removeEventListener('paste', handlePaste);
     };
-  }, [pasteImageAtCanvasPosition, selectedUploadNodeId]);
+  }, [
+    hasFreshInternalClipboard,
+    markSystemClipboardFresh,
+    pasteImageAtCanvasPosition,
+    selectedUploadNodeId,
+  ]);
 
   // Use a ref to keep the keydown handler's closure pointed at the
   // latest snapshot of selection / nodes / edges without re-binding
   // the listener on every change.
   const stateRef = useRef({
     nodes,
-    edges,
     selectedNodeId,
     selectedNodeIds,
     selectedUploadNodeId,
@@ -171,27 +164,69 @@ export function useCanvasShortcuts(args: UseCanvasShortcutsArgs): void {
   useEffect(() => {
     stateRef.current = {
       nodes,
-      edges,
       selectedNodeId,
       selectedNodeIds,
       selectedUploadNodeId,
     };
-  }, [edges, nodes, selectedNodeId, selectedNodeIds, selectedUploadNodeId]);
+  }, [nodes, selectedNodeId, selectedNodeIds, selectedUploadNodeId]);
 
   // Action callbacks also live behind a ref. Same reasoning — we want
   // the keydown effect to mount once.
-  const actionsRef = useRef({ undo, redo, groupNodes, deleteNode, deleteNodes, scheduleCanvasPersist });
+  const actionsRef = useRef({
+    undo,
+    redo,
+    groupNodes,
+    deleteNode,
+    deleteNodes,
+    scheduleCanvasPersist,
+    copyNodesToClipboard,
+    pasteFromShortcut,
+    hasFreshInternalClipboard,
+    markSystemClipboardFresh,
+  });
   useEffect(() => {
-    actionsRef.current = { undo, redo, groupNodes, deleteNode, deleteNodes, scheduleCanvasPersist };
-  }, [undo, redo, groupNodes, deleteNode, deleteNodes, scheduleCanvasPersist]);
+    actionsRef.current = {
+      undo,
+      redo,
+      groupNodes,
+      deleteNode,
+      deleteNodes,
+      scheduleCanvasPersist,
+      copyNodesToClipboard,
+      pasteFromShortcut,
+      hasFreshInternalClipboard,
+      markSystemClipboardFresh,
+    };
+  }, [
+    undo,
+    redo,
+    groupNodes,
+    deleteNode,
+    deleteNodes,
+    scheduleCanvasPersist,
+    copyNodesToClipboard,
+    pasteFromShortcut,
+    hasFreshInternalClipboard,
+    markSystemClipboardFresh,
+  ]);
 
   const handleKeyDown = useCallback((event: KeyboardEvent) => {
     if (isTypingTarget(event.target)) {
       return;
     }
 
-    const { nodes: latestNodes, edges: latestEdges, selectedNodeId: latestSelectedId, selectedNodeIds: latestSelectedIds } = stateRef.current;
-    const { undo: doUndo, redo: doRedo, groupNodes: doGroup, deleteNode: doDeleteOne, deleteNodes: doDeleteMany, scheduleCanvasPersist: doPersist } = actionsRef.current;
+    const { selectedNodeId: latestSelectedId, selectedNodeIds: latestSelectedIds } = stateRef.current;
+    const {
+      undo: doUndo,
+      redo: doRedo,
+      groupNodes: doGroup,
+      deleteNode: doDeleteOne,
+      deleteNodes: doDeleteMany,
+      scheduleCanvasPersist: doPersist,
+      copyNodesToClipboard: doCopy,
+      pasteFromShortcut: doPasteFromShortcut,
+      hasFreshInternalClipboard: doHasFreshInternalClipboard,
+    } = actionsRef.current;
 
     const commandPressed = event.ctrlKey || event.metaKey;
     const key = event.key.toLowerCase();
@@ -206,33 +241,18 @@ export function useCanvasShortcuts(args: UseCanvasShortcutsArgs): void {
         return;
       }
       event.preventDefault();
-      const selectedIdSet = new Set(latestSelectedIds);
-      copiedSnapshotRef.current = {
-        nodes: latestNodes.filter((node) => selectedIdSet.has(node.id)),
-        edges: latestEdges.filter(
-          (edge) => selectedIdSet.has(edge.source) && selectedIdSet.has(edge.target),
-        ),
-      };
+      doCopy(latestSelectedIds);
       return;
     }
 
     if (isPaste) {
-      // The browser's Cmd/Ctrl+V keydown can arrive before the actual
-      // paste event. Defer one tick so image paste can claim the clipboard
-      // first; if it does not, fall back to duplicating copied canvas nodes.
+      if (!doHasFreshInternalClipboard()) {
+        pasteImageHandledRef.current = false;
+        return;
+      }
+      event.preventDefault();
       pasteImageHandledRef.current = false;
-      window.setTimeout(() => {
-        if (pasteImageHandledRef.current) {
-          pasteImageHandledRef.current = false;
-          return;
-        }
-
-        if (!copiedSnapshotRef.current || copiedSnapshotRef.current.nodes.length === 0) {
-          return;
-        }
-
-        void duplicateNodesRef.current?.(copiedSnapshotRef.current.nodes.map((node) => node.id));
-      }, 0);
+      void doPasteFromShortcut();
       return;
     }
 

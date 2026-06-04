@@ -45,6 +45,7 @@
     "emptyHintSubtitle": "Double-click to add a node",
     "batchToolbar": {
       "selectedCount": "{{count}} selected",
+      "copy": "Copy Nodes",
       "group": "Group",
       "ungroup": "Ungroup",
       "trigger": "Trigger",
@@ -75,6 +76,8 @@
   "nodeToolbar": {
     "reupload": "Reupload",
     "copy": "Copy",
+    "copyNode": "Copy Node",
+    "paste": "Paste",
     "copyText": "Copy Text",
     "copyErrorReport": "Copy Error",
     "copied": "Copied",
@@ -1027,7 +1030,39 @@
     "about": "About",
     "aboutDesc": "Open-source project information and update settings",
     "general": "General",
-    "generalDesc": "Canvas interaction, storyboard generation, and download paths",
+    "generalDesc": "Storyboard generation, prompt generation, and download paths",
+    "keybindings": "Keybindings",
+    "keybindingsDesc": "Configure mouse actions, canvas pan, and WASD movement habits",
+    "canvasInteraction": {
+      "title": "Canvas Operation Habits",
+      "desc": "Configure mouse bindings, box selection, node context menus, and WASD canvas pan.",
+      "preset": "Operation Preset",
+      "resetDefault": "Reset Default",
+      "presets": {
+        "default": "Default Preset",
+        "traditional": "Traditional Preset",
+        "custom": "Custom"
+      },
+      "slots": {
+        "leftClick": "Left Click",
+        "leftDrag": "Left Drag",
+        "rightClick": "Right Click",
+        "rightDrag": "Right Drag",
+        "middleClick": "Middle Click",
+        "middleDrag": "Middle Drag"
+      },
+      "actions": {
+        "none": "No Action",
+        "selectNode": "Select Node",
+        "panCanvas": "Move Canvas",
+        "selectionBox": "Box Select",
+        "nodeMenu": "Node Menu"
+      },
+      "wasdPan": "Enable WASD Canvas Pan",
+      "wasdPanDesc": "When the canvas has focus and no input is active, W/A/S/D pans the view.",
+      "wasdSensitivity": "WASD Pan Sensitivity",
+      "wasdSensitivityValue": "Sensitivity {{value}}"
+    },
     "promptManagement": {
       "title": "Prompt Management",
       "desc": "Manage default language and custom overrides for built-in feature prompts.",

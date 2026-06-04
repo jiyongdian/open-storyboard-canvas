@@ -45,6 +45,7 @@
     "emptyHintSubtitle": "Double-click to add a node",
     "batchToolbar": {
       "selectedCount": "已选 {{count}} 个",
+      "copy": "复制节点",
       "group": "打组",
       "ungroup": "解组",
       "trigger": "批量触发",
@@ -75,6 +76,8 @@
   "nodeToolbar": {
     "reupload": "重新上传",
     "copy": "复制",
+    "copyNode": "复制节点",
+    "paste": "粘贴",
     "copyText": "复制文本",
     "copyErrorReport": "复制报错",
     "copied": "已复制",
@@ -1027,7 +1030,39 @@
     "about": "关于",
     "aboutDesc": "开源项目信息与更新设置",
     "general": "通用",
-    "generalDesc": "画布交互、分镜生成和下载路径",
+    "generalDesc": "分镜生成、提示词生成和下载路径",
+    "keybindings": "键位设置",
+    "keybindingsDesc": "配置鼠标操作、画布平移和 WASD 移动习惯",
+    "canvasInteraction": {
+      "title": "画布操作习惯",
+      "desc": "配置鼠标键位、框选、右键菜单和 WASD 画布平移。",
+      "preset": "操作预设",
+      "resetDefault": "恢复默认",
+      "presets": {
+        "default": "默认预设",
+        "traditional": "传统预设",
+        "custom": "自定义"
+      },
+      "slots": {
+        "leftClick": "左键单击",
+        "leftDrag": "左键拖动",
+        "rightClick": "右键单击",
+        "rightDrag": "右键拖动",
+        "middleClick": "中键单击",
+        "middleDrag": "中键拖动"
+      },
+      "actions": {
+        "none": "无操作",
+        "selectNode": "选中节点",
+        "panCanvas": "移动画布",
+        "selectionBox": "框选",
+        "nodeMenu": "节点菜单"
+      },
+      "wasdPan": "开启 WASD 移动画布",
+      "wasdPanDesc": "画布获得焦点且不在输入框内时，W/A/S/D 平移视图。",
+      "wasdSensitivity": "WASD 平移灵敏度",
+      "wasdSensitivityValue": "灵敏度 {{value}}"
+    },
     "promptManagement": {
       "title": "提示词管理",
       "desc": "管理内置功能提示词的默认语言和自定义覆盖。",

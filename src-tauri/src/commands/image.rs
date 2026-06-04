@@ -81,6 +81,21 @@ pub struct RenameLocalMediaFilesResult {
     pub file_name: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemClipboardImage {
+    pub bytes: Vec<u8>,
+    pub mime_type: String,
+    pub file_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemClipboardContent {
+    pub image: Option<SystemClipboardImage>,
+    pub text: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LocalMediaKind {
     Image,
@@ -2724,6 +2739,43 @@ pub async fn copy_image_source_to_clipboard(source: String) -> Result<(), String
         .map_err(|e| format!("Failed to write image into clipboard: {}", e))?;
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn read_system_clipboard() -> Result<SystemClipboardContent, String> {
+    let mut clipboard =
+        Clipboard::new().map_err(|e| format!("Failed to access clipboard: {}", e))?;
+
+    let image = match clipboard.get_image() {
+        Ok(image_data) => {
+            let width = image_data.width as u32;
+            let height = image_data.height as u32;
+            let pixels = image_data.bytes.into_owned();
+            let rgba_image = RgbaImage::from_raw(width, height, pixels)
+                .ok_or_else(|| "Failed to decode clipboard image pixels".to_string())?;
+            let bytes = encode_dynamic_image_as_png(&DynamicImage::ImageRgba8(rgba_image))?;
+            Some(SystemClipboardImage {
+                bytes,
+                mime_type: "image/png".to_string(),
+                file_name: "pasted-image.png".to_string(),
+            })
+        }
+        Err(_) => None,
+    };
+
+    let text = match clipboard.get_text() {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(value)
+            }
+        }
+        Err(_) => None,
+    };
+
+    Ok(SystemClipboardContent { image, text })
 }
 
 #[tauri::command]

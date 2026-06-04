@@ -1,4 +1,4 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, isTauri } from '@tauri-apps/api/core';
 
 export async function splitImage(
   imageBase64: string,
@@ -94,6 +94,17 @@ export interface MergeStoryboardImagesResult {
   textOverlayApplied: boolean;
 }
 
+export interface SystemClipboardImage {
+  bytes: number[];
+  mimeType: string;
+  fileName: string;
+}
+
+export interface SystemClipboardContent {
+  image?: SystemClipboardImage | null;
+  text?: string | null;
+}
+
 export async function mergeStoryboardImages(
   payload: MergeStoryboardImagesPayload
 ): Promise<MergeStoryboardImagesResult> {
@@ -178,6 +189,13 @@ export async function persistImageBinary(
     bytes: Array.from(bytes),
     extension,
   });
+}
+
+export async function readSystemClipboard(): Promise<SystemClipboardContent | null> {
+  if (!isTauri()) {
+    return null;
+  }
+  return await invoke('read_system_clipboard');
 }
 
 export async function renameLocalMediaFiles(
