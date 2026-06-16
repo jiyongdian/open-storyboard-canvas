@@ -5,8 +5,10 @@ export const CANVAS_NODE_TYPES = {
   imageEdit: 'imageNode',
   aiVideo: 'aiVideoNode',
   aiText: 'aiTextNode',
+  aiAudio: 'aiAudioNode',
   exportImage: 'exportImageNode',
   video: 'videoNode',
+  audio: 'audioNode',
   textAnnotation: 'textAnnotationNode',
   jsonCard: 'jsonCardNode',
   group: 'groupNode',
@@ -178,6 +180,20 @@ export interface AiTextNodeData extends NodeDisplayData {
   [key: string]: unknown;
 }
 
+export interface AiAudioNodeData extends NodeDisplayData {
+  prompt: string;
+  modelId?: string | null;
+  voiceId?: string | null;
+  controlInstruction?: string | null;
+  usePromptText?: boolean | null;
+  promptTextValue?: string | null;
+  audioGenerationParams?: Record<string, unknown>;
+  resultNodeId?: string | null;
+  lastRunInputHash?: string | null;
+  lastError?: string | null;
+  [key: string]: unknown;
+}
+
 export interface VideoNodeData extends NodeDisplayData {
   videoUrl: string | null;
   localVideoUrl?: string | null;
@@ -202,6 +218,35 @@ export interface VideoNodeData extends NodeDisplayData {
   generationRetryRequestedAt?: number | null;
   sourcePrompt?: string;
   sourceReferenceCount?: number;
+  [key: string]: unknown;
+}
+
+export interface AudioNodeData extends NodeDisplayData {
+  audioUrl: string | null;
+  localAudioUrl?: string | null;
+  sourceFileName?: string | null;
+  durationSeconds?: number | null;
+  isAudioTrimMode?: boolean | null;
+  audioTrimStartSeconds?: number | null;
+  audioTrimEndSeconds?: number | null;
+  generatedFileName?: string | null;
+  generatedNamingMode?: 'default' | 'custom';
+  isGenerating?: boolean;
+  generationStartedAt?: number | null;
+  generationDurationMs?: number;
+  generationElapsedMs?: number | null;
+  generationError?: string | null;
+  generationErrorDetails?: string | null;
+  sourcePrompt?: string;
+  sourceTextLength?: number;
+  sourceVoiceId?: string | null;
+  sourceModelId?: string | null;
+  sourceControlInstruction?: string | null;
+  sourcePromptTextValue?: string | null;
+  sourceAudioMode?: string | null;
+  sourceReferenceCount?: number;
+  sourceReferenceAudioId?: string | null;
+  sourceReferenceAudioTitle?: string | null;
   [key: string]: unknown;
 }
 
@@ -534,12 +579,14 @@ export type CanvasNodeData =
   | UploadImageNodeData
   | ExportImageNodeData
   | VideoNodeData
+  | AudioNodeData
   | TextAnnotationNodeData
   | JsonCardNodeData
   | GroupNodeData
   | ImageEditNodeData
   | AiVideoNodeData
   | AiTextNodeData
+  | AiAudioNodeData
   | StoryboardSplitNodeData
   | StoryboardGenNodeData
   | PanoramaNodeData
@@ -611,6 +658,12 @@ export function isAiTextNode(
   return node?.type === CANVAS_NODE_TYPES.aiText;
 }
 
+export function isAiAudioNode(
+  node: CanvasNode | null | undefined
+): node is Node<AiAudioNodeData, typeof CANVAS_NODE_TYPES.aiAudio> {
+  return node?.type === CANVAS_NODE_TYPES.aiAudio;
+}
+
 export function isExportImageNode(
   node: CanvasNode | null | undefined
 ): node is Node<ExportImageNodeData, typeof CANVAS_NODE_TYPES.exportImage> {
@@ -621,6 +674,12 @@ export function isVideoNode(
   node: CanvasNode | null | undefined
 ): node is Node<VideoNodeData, typeof CANVAS_NODE_TYPES.video> {
   return node?.type === CANVAS_NODE_TYPES.video;
+}
+
+export function isAudioNode(
+  node: CanvasNode | null | undefined
+): node is Node<AudioNodeData, typeof CANVAS_NODE_TYPES.audio> {
+  return node?.type === CANVAS_NODE_TYPES.audio;
 }
 
 export function isGroupNode(

@@ -18,6 +18,10 @@ import {
   createDefaultTextAgent,
   normalizeTextAgents,
 } from '@/features/canvas/application/aiText/helpers';
+import {
+  defaultAudioInputSchemaForProviderKind,
+  normalizeAudioInputSchema,
+} from '@/features/canvas/application/audioInputSchema';
 import type { TextAgentConfig } from '@/features/canvas/application/aiText/types';
 
 export type UiRadiusPreset = 'compact' | 'default' | 'large';
@@ -34,6 +38,9 @@ export type CanvasMouseBindingSlot =
   | 'middleClick'
   | 'middleDrag';
 export type CanvasMouseBindings = Record<CanvasMouseBindingSlot, CanvasMouseAction>;
+export type ImageHostProvider = 'pixhost' | 'seedvault';
+export type AudioOutputMode = 'server' | 'segmented';
+export type AudioProviderKind = 'local-doubao-tts' | 'gradio-voxcpm';
 export type ProviderApiKeys = Record<string, string>;
 export const DEFAULT_GRSAI_NANO_BANANA_PRO_MODEL = 'nano-banana-pro';
 export {
@@ -73,6 +80,130 @@ export interface PromptPreset {
   updatedAt: number;
 }
 
+export interface ImageHostSettings {
+  enabled: boolean;
+  provider: ImageHostProvider;
+  pixhost: {
+    apiBaseUrl: string;
+    contentType: string;
+    maxThumbnailSize: string;
+  };
+  seedvault: {
+    apiBaseUrl: string;
+    email: string;
+    password: string;
+    token: string;
+    strategyId: string;
+  };
+}
+
+export interface AudioVoiceOption {
+  id: string;
+  name: string;
+  category?: string;
+  locale?: string;
+  raw?: unknown;
+}
+
+export interface AudioVoiceCategory {
+  key: string;
+  label: string;
+}
+
+export interface AudioModelConfig {
+  id: string;
+  name: string;
+  providerKind: AudioProviderKind;
+  apiBaseUrl: string;
+  endpointPath: string;
+  outputMode: AudioOutputMode;
+  defaultVoiceId: string;
+  timeoutMs: number;
+  enabled: boolean;
+  extraParams?: Record<string, unknown>;
+}
+
+export interface AudioGenerationSettings {
+  apiBaseUrl: string;
+  defaultOutputMode: AudioOutputMode;
+  defaultTimeoutMs: number;
+  voices: AudioVoiceOption[];
+  categories: AudioVoiceCategory[];
+  selectedVoiceId: string;
+  lastSyncedAt?: number | null;
+  models: AudioModelConfig[];
+}
+
+export const DEFAULT_IMAGE_HOST_SETTINGS: ImageHostSettings = {
+  enabled: false,
+  provider: 'pixhost',
+  pixhost: {
+    apiBaseUrl: 'https://api.pixhost.to',
+    contentType: '0',
+    maxThumbnailSize: '420',
+  },
+  seedvault: {
+    apiBaseUrl: 'https://img.seedvault.cn/api/v1',
+    email: '',
+    password: '',
+    token: '',
+    strategyId: '',
+  },
+};
+
+export const DEFAULT_AUDIO_API_BASE_URL = 'http://127.0.0.1:17860';
+
+export const DEFAULT_AUDIO_GENERATION_SETTINGS: AudioGenerationSettings = {
+  apiBaseUrl: DEFAULT_AUDIO_API_BASE_URL,
+  defaultOutputMode: 'server',
+  defaultTimeoutMs: 180000,
+  voices: [],
+  categories: [
+    { key: 'female', label: '女声' },
+    { key: 'male', label: '男声' },
+    { key: 'accent', label: '口音' },
+    { key: 'characters', label: '角色' },
+    { key: 'english', label: '英文' },
+  ],
+  selectedVoiceId: '',
+  lastSyncedAt: null,
+  models: [
+    {
+      id: 'local-doubao-tts',
+      name: '本地豆包 TTS',
+      providerKind: 'local-doubao-tts',
+      apiBaseUrl: DEFAULT_AUDIO_API_BASE_URL,
+      endpointPath: '/tts',
+      outputMode: 'server',
+      defaultVoiceId: '',
+      timeoutMs: 180000,
+      enabled: true,
+    },
+    {
+      id: 'voxcpm-online',
+      name: 'VoxCPM 在线 TTS',
+      providerKind: 'gradio-voxcpm',
+      apiBaseUrl: 'https://voxcpm.modelbest.cn',
+      endpointPath: '/gradio_api/call/generate',
+      outputMode: 'server',
+      defaultVoiceId: '',
+      timeoutMs: 180000,
+      enabled: true,
+      extraParams: {
+        audioInputSchema: defaultAudioInputSchemaForProviderKind('gradio-voxcpm'),
+        controlInstruction: '自然、清晰、有表现力',
+        usePromptText: false,
+        promptTextValue: '',
+        cfgValue: 2,
+        doNormalize: false,
+        denoise: false,
+        ditSteps: 10,
+        userId: 'fp-2fejme4mpcko',
+      },
+    },
+  ],
+};
+
 interface SettingsState {
   isHydrated: boolean;
   apiKeys: ProviderApiKeys;
@@ -107,6 +238,8 @@ interface SettingsState {
   promptTemplateOverrides: PromptTemplateOverrideMap;
   promptPresets: PromptPreset[];
   textAgents: TextAgentConfig[];
+  imageHostSettings: ImageHostSettings;
+  audioGenerationSettings: AudioGenerationSettings;
   multiAnglePromptTemplate: string;
   lightingPromptTemplate: string;
   /** Last-seen Dreamina login status; refreshed by the settings screen on demand. */
@@ -160,6 +293,8 @@ interface SettingsState {
   addTextAgent: () => TextAgentConfig;
   updateTextAgent: (id: string, patch: Partial<TextAgentConfig>) => void;
   deleteTextAgent: (id: string) => void;
+  setImageHostSettings: (settings: ImageHostSettings) => void;
+  setAudioGenerationSettings: (settings: AudioGenerationSettings) => void;
   setMultiAnglePromptTemplate: (template: string) => void;
   setLightingPromptTemplate: (template: string) => void;
   resetMultiAnglePromptTemplate: () => void;
@@ -180,6 +315,325 @@ function normalizeHexColor(input: string): string {
 
 function normalizeApiKey(input: string): string {
   return input.trim();
+}
+
+function trimTrailingSlash(input: string): string {
+  return input.trim().replace(/\/+$/, '');
+}
+
+function normalizeUrlSetting(input: unknown, fallback: string): string {
+  if (typeof input !== 'string') {
+    return fallback;
+  }
+  const trimmed = trimTrailingSlash(input);
+  if (!trimmed) {
+    return fallback;
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return trimmed;
+    }
+  } catch {
+    return fallback;
+  }
+  return fallback;
+}
+
+function normalizeImageHostProvider(input: unknown): ImageHostProvider {
+  return input === 'seedvault' || input === 'pixhost' ? input : 'pixhost';
+}
+
+function normalizeAudioOutputMode(input: unknown, fallback: AudioOutputMode): AudioOutputMode {
+  return input === 'segmented' || input === 'server' ? input : fallback;
+}
+
+function normalizeAudioProviderKind(input: unknown, fallback: AudioProviderKind): AudioProviderKind {
+  return input === 'gradio-voxcpm' || input === 'local-doubao-tts' ? input : fallback;
+}
+
+function normalizeAudioTimeoutMs(input: unknown, fallback: number): number {
+  const numeric = typeof input === 'number' ? input : Number(input);
+  if (!Number.isFinite(numeric)) {
+    return fallback;
+  }
+  return Math.min(600000, Math.max(5000, Math.round(numeric)));
+}
+
+function asPlainRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function normalizeAudioExtraParams(
+  input: unknown,
+  providerKind: AudioProviderKind
+): Record<string, unknown> {
+  const record = asPlainRecord(input);
+  if (!record) {
+    return {
+      audioInputSchema: defaultAudioInputSchemaForProviderKind(providerKind),
+    };
+  }
+  return {
+    ...record,
+    audioInputSchema: normalizeAudioInputSchema(
+      record.audioInputSchema,
+      defaultAudioInputSchemaForProviderKind(providerKind)
+    ),
+  };
+}
+
+function normalizeAudioVoiceOption(input: unknown): AudioVoiceOption | null {
+  if (!input || typeof input !== 'object') {
+    return null;
+  }
+
+  const raw = input as Partial<AudioVoiceOption> & Record<string, unknown>;
+  const id = (
+    typeof raw.id === 'string' ? raw.id :
+    typeof raw.voiceId === 'string' ? raw.voiceId :
+    typeof raw.value === 'string' ? raw.value :
+    typeof raw.key === 'string' ? raw.key :
+    ''
+  ).trim();
+  if (!id) {
+    return null;
+  }
+
+  const name = (
+    typeof raw.name === 'string' ? raw.name :
+    typeof raw.label === 'string' ? raw.label :
+    typeof raw.title === 'string' ? raw.title :
+    id
+  ).trim() || id;
+  const category = typeof raw.category === 'string' && raw.category.trim()
+    ? raw.category.trim()
+    : undefined;
+  const locale = typeof raw.locale === 'string' && raw.locale.trim()
+    ? raw.locale.trim()
+    : typeof raw.languageCode === 'string' && raw.languageCode.trim()
+      ? raw.languageCode.trim()
+      : undefined;
+
+  return {
+    id,
+    name,
+    category,
+    locale,
+    raw: raw.raw ?? input,
+  };
+}
+
+function normalizeAudioVoiceOptions(input: unknown): AudioVoiceOption[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const voices: AudioVoiceOption[] = [];
+  input.forEach((item) => {
+    const voice = normalizeAudioVoiceOption(item);
+    if (!voice || seen.has(voice.id)) {
+      return;
+    }
+    seen.add(voice.id);
+    voices.push(voice);
+  });
+  return voices.slice(0, 2000);
+}
+
+function normalizeAudioVoiceCategory(input: unknown): AudioVoiceCategory | null {
+  if (!input || typeof input !== 'object') {
+    return null;
+  }
+  const raw = input as Partial<AudioVoiceCategory> & Record<string, unknown>;
+  const key = (
+    typeof raw.key === 'string' ? raw.key :
+    typeof raw.id === 'string' ? raw.id :
+    typeof raw.value === 'string' ? raw.value :
+    ''
+  ).trim();
+  if (!key) {
+    return null;
+  }
+  const label = (
+    typeof raw.label === 'string' ? raw.label :
+    typeof raw.name === 'string' ? raw.name :
+    key
+  ).trim() || key;
+  return { key, label };
+}
+
+function normalizeAudioVoiceCategories(input: unknown): AudioVoiceCategory[] {
+  const fallback = DEFAULT_AUDIO_GENERATION_SETTINGS.categories.map((item) => ({ ...item }));
+  if (!Array.isArray(input)) {
+    return fallback;
+  }
+  const seen = new Set<string>();
+  const categories: AudioVoiceCategory[] = [];
+  input.forEach((item) => {
+    const category = normalizeAudioVoiceCategory(item);
+    if (!category || seen.has(category.key)) {
+      return;
+    }
+    seen.add(category.key);
+    categories.push(category);
+  });
+  return categories.length > 0 ? categories.slice(0, 200) : fallback;
+}
+
+function createAudioModelId(): string {
+  return `audio-model-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeAudioModelConfig(
+  input: unknown,
+  fallback: AudioModelConfig
+): AudioModelConfig {
+  const raw = input && typeof input === 'object'
+    ? input as Partial<AudioModelConfig>
+    : {};
+  const id = typeof raw.id === 'string' && raw.id.trim()
+    ? raw.id.trim()
+    : fallback.id || createAudioModelId();
+  const name = typeof raw.name === 'string' && raw.name.trim()
+    ? raw.name.trim()
+    : fallback.name;
+  const endpointPath = typeof raw.endpointPath === 'string' && raw.endpointPath.trim()
+    ? `/${raw.endpointPath.trim().replace(/^\/+/, '')}`
+    : fallback.endpointPath;
+  const providerKind = normalizeAudioProviderKind(
+    raw.providerKind ?? asPlainRecord(raw.extraParams)?.providerKind,
+    fallback.providerKind
+  );
+
+  const fallbackExtraParams = asPlainRecord(fallback.extraParams) ?? {};
+  const rawExtraParams = asPlainRecord(raw.extraParams) ?? {};
+  const mergedExtraParams = {
+    ...fallbackExtraParams,
+    ...rawExtraParams,
+    audioInputSchema: rawExtraParams.audioInputSchema
+      ?? fallbackExtraParams.audioInputSchema
+      ?? defaultAudioInputSchemaForProviderKind(providerKind),
+  };
+
+  return {
+    id,
+    name,
+    providerKind,
+    apiBaseUrl: normalizeUrlSetting(raw.apiBaseUrl, fallback.apiBaseUrl),
+    endpointPath,
+    outputMode: normalizeAudioOutputMode(raw.outputMode, fallback.outputMode),
+    defaultVoiceId: typeof raw.defaultVoiceId === 'string' ? raw.defaultVoiceId.trim() : '',
+    timeoutMs: normalizeAudioTimeoutMs(raw.timeoutMs, fallback.timeoutMs),
+    enabled: raw.enabled !== false,
+    extraParams: normalizeAudioExtraParams(mergedExtraParams, providerKind),
+  };
+}
+
+function normalizeAudioModelConfigs(input: unknown, settingsBaseUrl: string): AudioModelConfig[] {
+  const fallbackModels = DEFAULT_AUDIO_GENERATION_SETTINGS.models.map((model) => ({
+    ...model,
+    apiBaseUrl: model.providerKind === 'local-doubao-tts' ? settingsBaseUrl : model.apiBaseUrl,
+  }));
+  const seen = new Set<string>();
+  const models: AudioModelConfig[] = [];
+
+  fallbackModels.forEach((fallback) => {
+    const item = Array.isArray(input)
+      ? input.find((candidate) => {
+        const record = asPlainRecord(candidate);
+        return record?.providerKind === fallback.providerKind || record?.id === fallback.id;
+      })
+      : undefined;
+    const model = normalizeAudioModelConfig(item, fallback);
+    model.id = fallback.id;
+    model.providerKind = fallback.providerKind;
+    if (model.providerKind === 'gradio-voxcpm') {
+      model.defaultVoiceId = '';
+    }
+    seen.add(model.id);
+    models.push(model);
+  });
+
+  return models.slice(0, 50);
+}
+
+export function normalizeAudioGenerationSettings(input: unknown): AudioGenerationSettings {
+  const raw = input && typeof input === 'object'
+    ? input as Partial<AudioGenerationSettings>
+    : {};
+  const apiBaseUrl = normalizeUrlSetting(
+    raw.apiBaseUrl,
+    DEFAULT_AUDIO_GENERATION_SETTINGS.apiBaseUrl
+  );
+  const voices = normalizeAudioVoiceOptions(raw.voices);
+  const selectedVoiceId =
+    typeof raw.selectedVoiceId === 'string' && raw.selectedVoiceId.trim()
+      ? raw.selectedVoiceId.trim()
+      : voices[0]?.id ?? '';
+
+  return {
+    apiBaseUrl,
+    defaultOutputMode: normalizeAudioOutputMode(
+      raw.defaultOutputMode,
+      DEFAULT_AUDIO_GENERATION_SETTINGS.defaultOutputMode
+    ),
+    defaultTimeoutMs: normalizeAudioTimeoutMs(
+      raw.defaultTimeoutMs,
+      DEFAULT_AUDIO_GENERATION_SETTINGS.defaultTimeoutMs
+    ),
+    voices,
+    categories: normalizeAudioVoiceCategories(raw.categories),
+    selectedVoiceId,
+    lastSyncedAt:
+      typeof raw.lastSyncedAt === 'number' && Number.isFinite(raw.lastSyncedAt)
+        ? raw.lastSyncedAt
+        : null,
+    models: normalizeAudioModelConfigs(raw.models, apiBaseUrl),
+  };
+}
+
+export function normalizeImageHostSettings(input: unknown): ImageHostSettings {
+  const raw = input && typeof input === 'object'
+    ? input as Partial<ImageHostSettings>
+    : {};
+  const rawPixhost = raw.pixhost && typeof raw.pixhost === 'object'
+    ? raw.pixhost as Partial<ImageHostSettings['pixhost']>
+    : {};
+  const rawSeedvault = raw.seedvault && typeof raw.seedvault === 'object'
+    ? raw.seedvault as Partial<ImageHostSettings['seedvault']>
+    : {};
+
+  return {
+    enabled: raw.enabled === true,
+    provider: normalizeImageHostProvider(raw.provider),
+    pixhost: {
+      apiBaseUrl: normalizeUrlSetting(
+        rawPixhost.apiBaseUrl,
+        DEFAULT_IMAGE_HOST_SETTINGS.pixhost.apiBaseUrl
+      ),
+      contentType: typeof rawPixhost.contentType === 'string' && rawPixhost.contentType.trim()
+        ? rawPixhost.contentType.trim()
+        : DEFAULT_IMAGE_HOST_SETTINGS.pixhost.contentType,
+      maxThumbnailSize:
+        typeof rawPixhost.maxThumbnailSize === 'string' && rawPixhost.maxThumbnailSize.trim()
+          ? rawPixhost.maxThumbnailSize.trim()
+          : DEFAULT_IMAGE_HOST_SETTINGS.pixhost.maxThumbnailSize,
+    },
+    seedvault: {
+      apiBaseUrl: normalizeUrlSetting(
+        rawSeedvault.apiBaseUrl,
+        DEFAULT_IMAGE_HOST_SETTINGS.seedvault.apiBaseUrl
+      ),
+      email: typeof rawSeedvault.email === 'string' ? rawSeedvault.email.trim() : '',
+      password: typeof rawSeedvault.password === 'string' ? rawSeedvault.password : '',
+      token: typeof rawSeedvault.token === 'string' ? rawSeedvault.token.trim() : '',
+      strategyId: typeof rawSeedvault.strategyId === 'string' ? rawSeedvault.strategyId.trim() : '',
+    },
+  };
 }
 
 function normalizeGrsaiNanoBananaProModel(input: string | null | undefined): string {
@@ -514,6 +968,8 @@ export const useSettingsStore = create<SettingsState>()(
       promptTemplateOverrides: {},
       promptPresets: [],
       textAgents: [],
+      imageHostSettings: normalizeImageHostSettings(DEFAULT_IMAGE_HOST_SETTINGS),
+      audioGenerationSettings: normalizeAudioGenerationSettings(DEFAULT_AUDIO_GENERATION_SETTINGS),
       multiAnglePromptTemplate: DEFAULT_MULTI_ANGLE_PROMPT_TEMPLATE,
       lightingPromptTemplate: DEFAULT_LIGHTING_PROMPT_TEMPLATE,
       dreaminaStatus: null,
@@ -722,6 +1178,10 @@ export const useSettingsStore = create<SettingsState>()(
         set((state) => ({
           textAgents: state.textAgents.filter((agent) => agent.id !== id),
         })),
+      setImageHostSettings: (settings) =>
+        set({ imageHostSettings: normalizeImageHostSettings(settings) }),
+      setAudioGenerationSettings: (settings) =>
+        set({ audioGenerationSettings: normalizeAudioGenerationSettings(settings) }),
       setMultiAnglePromptTemplate: (template) =>
         set((state) => {
           const nextTemplate = template.trim() || DEFAULT_MULTI_ANGLE_PROMPT_TEMPLATE;
@@ -797,7 +1257,7 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: 'settings-storage',
-      version: 15,
+      version: 20,
       onRehydrateStorage: () => {
         return (_state, error) => {
           if (error) {
@@ -834,6 +1294,8 @@ export const useSettingsStore = create<SettingsState>()(
           promptTemplateOverrides?: PromptTemplateOverrideMap;
           promptPresets?: PromptPreset[];
           textAgents?: TextAgentConfig[];
+          imageHostSettings?: ImageHostSettings;
+          audioGenerationSettings?: AudioGenerationSettings;
           multiAnglePromptTemplate?: string;
           lightingPromptTemplate?: string;
         };
@@ -877,6 +1339,8 @@ export const useSettingsStore = create<SettingsState>()(
           ? normalizeCanvasMouseBindings(state.canvasMouseBindings)
           : bindingsForCanvasMousePreset(canvasMouseBindingPreset);
         const textAgents = normalizeTextAgents(state.textAgents);
+        const imageHostSettings = normalizeImageHostSettings(state.imageHostSettings);
+        const audioGenerationSettings = normalizeAudioGenerationSettings(state.audioGenerationSettings);
         if (Object.keys(migratedApiKeys).length > 0) {
           return {
             ...persistedWithoutPricing,
@@ -915,6 +1379,8 @@ export const useSettingsStore = create<SettingsState>()(
             promptTemplateOverrides,
             promptPresets,
             textAgents,
+            imageHostSettings,
+            audioGenerationSettings,
             multiAnglePromptTemplate:
               state.multiAnglePromptTemplate?.trim() || DEFAULT_MULTI_ANGLE_PROMPT_TEMPLATE,
             lightingPromptTemplate: migratedLightingTemplate,
@@ -958,6 +1424,8 @@ export const useSettingsStore = create<SettingsState>()(
           promptTemplateOverrides,
           promptPresets,
           textAgents,
+          imageHostSettings,
+          audioGenerationSettings,
           multiAnglePromptTemplate:
             state.multiAnglePromptTemplate?.trim() || DEFAULT_MULTI_ANGLE_PROMPT_TEMPLATE,
           lightingPromptTemplate: migratedLightingTemplate,

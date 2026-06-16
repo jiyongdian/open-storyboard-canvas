@@ -3,8 +3,10 @@ import {
   CANVAS_NODE_TYPES,
   DEFAULT_ASPECT_RATIO,
   type ImageSize,
+  type AiAudioNodeData,
   type AiTextNodeData,
   type AiVideoNodeData,
+  type AudioNodeData,
   type BlueprintNodeData,
   type CanvasNodeData,
   type CanvasNodeType,
@@ -22,7 +24,7 @@ import {
 import { DEFAULT_NODE_DISPLAY_NAME } from './nodeDisplay';
 import { DEFAULT_IMAGE_MODEL_ID } from '../models';
 
-export type MenuIconKey = 'upload' | 'sparkles' | 'layout' | 'text' | 'video';
+export type MenuIconKey = 'upload' | 'sparkles' | 'layout' | 'text' | 'video' | 'audio';
 export type CanvasNodeSelectionToolbarMode = 'full' | 'deleteOnly' | 'none';
 
 export interface CanvasNodeCapabilities {
@@ -179,6 +181,39 @@ const aiTextNodeDefinition: CanvasNodeDefinition<AiTextNodeData> = {
   }),
 };
 
+const aiAudioNodeDefinition: CanvasNodeDefinition<AiAudioNodeData> = {
+  type: CANVAS_NODE_TYPES.aiAudio,
+  menuLabelKey: 'node.menu.aiAudioGeneration',
+  menuIcon: 'audio',
+  visibleInMenu: true,
+  defaultSize: {
+    width: 640,
+    height: 340,
+  },
+  capabilities: {
+    toolbar: true,
+    selectionToolbar: 'deleteOnly',
+    promptInput: false,
+  },
+  connectivity: {
+    sourceHandle: true,
+    targetHandle: true,
+    connectMenu: {
+      fromSource: true,
+      fromTarget: false,
+    },
+  },
+  createDefaultData: () => ({
+    displayName: DEFAULT_NODE_DISPLAY_NAME[CANVAS_NODE_TYPES.aiAudio],
+    prompt: '',
+    modelId: null,
+    voiceId: null,
+    resultNodeId: null,
+    lastRunInputHash: null,
+    lastError: null,
+  }),
+};
+
 const exportImageNodeDefinition: CanvasNodeDefinition<ExportImageNodeData> = {
   type: CANVAS_NODE_TYPES.exportImage,
   menuLabelKey: 'node.menu.uploadImage',
@@ -249,6 +284,47 @@ const videoNodeDefinition: CanvasNodeDefinition<VideoNodeData> = {
     generationError: null,
     generationErrorDetails: null,
     generationRetryResultUrl: null,
+  }),
+};
+
+const audioNodeDefinition: CanvasNodeDefinition<AudioNodeData> = {
+  type: CANVAS_NODE_TYPES.audio,
+  menuLabelKey: 'node.menu.audio',
+  menuIcon: 'audio',
+  visibleInMenu: true,
+  defaultSize: {
+    width: 360,
+    height: 160,
+  },
+  capabilities: {
+    toolbar: true,
+    selectionToolbar: 'full',
+    promptInput: false,
+  },
+  connectivity: {
+    sourceHandle: true,
+    targetHandle: true,
+    connectMenu: {
+      fromSource: true,
+      fromTarget: false,
+    },
+  },
+  createDefaultData: () => ({
+    displayName: DEFAULT_NODE_DISPLAY_NAME[CANVAS_NODE_TYPES.audio],
+    audioUrl: null,
+    localAudioUrl: null,
+    sourceFileName: null,
+    durationSeconds: null,
+    isGenerating: false,
+    generationStartedAt: null,
+    generationDurationMs: 180000,
+    generationElapsedMs: null,
+    generationError: null,
+    generationErrorDetails: null,
+    sourcePrompt: '',
+    sourceTextLength: 0,
+    sourceVoiceId: null,
+    sourceModelId: null,
   }),
 };
 
@@ -522,8 +598,10 @@ export const canvasNodeDefinitions: Record<CanvasNodeType, CanvasNodeDefinition>
   [CANVAS_NODE_TYPES.imageEdit]: imageEditNodeDefinition,
   [CANVAS_NODE_TYPES.aiVideo]: aiVideoNodeDefinition,
   [CANVAS_NODE_TYPES.aiText]: aiTextNodeDefinition,
+  [CANVAS_NODE_TYPES.aiAudio]: aiAudioNodeDefinition,
   [CANVAS_NODE_TYPES.exportImage]: exportImageNodeDefinition,
   [CANVAS_NODE_TYPES.video]: videoNodeDefinition,
+  [CANVAS_NODE_TYPES.audio]: audioNodeDefinition,
   [CANVAS_NODE_TYPES.textAnnotation]: textAnnotationNodeDefinition,
   [CANVAS_NODE_TYPES.jsonCard]: jsonCardNodeDefinition,
   [CANVAS_NODE_TYPES.group]: groupNodeDefinition,

@@ -523,10 +523,10 @@ export const AiTextNode = memo(({ id, data, selected, width, height }: AiTextNod
   }, [id, runAgent, selectedAgent?.id]);
 
   const handlePromptKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
+    event.stopPropagation();
     if (event.nativeEvent.isComposing) {
       return;
     }
-    event.stopPropagation();
     if (event.key === '@' && incomingReferenceItems.length > 0) {
       event.preventDefault();
       setReferencePickerOpen(true);

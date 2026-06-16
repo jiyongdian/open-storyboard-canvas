@@ -292,6 +292,47 @@ function compactRecord(record: Record<string, unknown>): Record<string, unknown>
   );
 }
 
+function compactJsonLike<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => compactJsonLike(item))
+      .filter((item) =>
+        item !== undefined
+        && item !== null
+        && item !== ''
+        && !(Array.isArray(item) && item.length === 0)
+      ) as T;
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .map(([key, item]) => [key, compactJsonLike(item)] as const)
+        .filter(([, item]) =>
+          item !== undefined
+          && item !== null
+          && item !== ''
+          && !(Array.isArray(item) && item.length === 0)
+        )
+    ) as T;
+  }
+  return value;
+}
+
+function cloneJsonLike<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => cloneJsonLike(item)) as T;
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+        key,
+        cloneJsonLike(item),
+      ])
+    ) as T;
+  }
+  return value;
+}
+
 function pickAllowedParams(
   source: Record<string, unknown>,
   allowedKeys: readonly string[],
@@ -918,6 +959,12 @@ const ARRAY_REFERENCE_IMAGE_FIELDS = new Set([
   'references',
   'refs',
   'urls',
+  'audio_urls',
+  'audios',
+  'audiourls',
+  'media_urls',
+  'video_urls',
+  'videos',
 ]);
 
 const SINGULAR_REFERENCE_IMAGE_FIELDS = new Set([
@@ -1050,6 +1097,20 @@ function setBodyValue(target: Record<string, unknown>, rawPath: string, value: u
     current = current[part] as Record<string, unknown>;
   });
   current[path[path.length - 1]] = value;
+}
+
+function setBodyValueIfPresent(target: Record<string, unknown>, rawPath: string, value: unknown): void {
+  const field = rawPath.trim();
+  if (!field) return;
+  if (value === undefined || value === null || value === '') {
+    deleteBodyValue(target, field);
+    return;
+  }
+  if (Array.isArray(value) && value.length === 0) {
+    deleteBodyValue(target, field);
+    return;
+  }
+  setBodyValue(target, field, value);
 }
 
 function deleteBodyValue(target: Record<string, unknown>, rawPath: string): void {
@@ -1501,10 +1562,12 @@ export function buildCustomVideoProviderRequestDebugPreview(
   const { cfg, model } = resolved;
   const method = cfg.httpMethod ?? 'POST';
   const bodyMode = resolveVideoRequestBodyMode(cfg);
-  const url = resolveVideoSubmitUrl(cfg, model, request);
   const headers = buildRequestHeaders(cfg, bodyMode, method);
   const body = bodyMode === 'json' ? buildVideoJsonBody(cfg, model, request) : undefined;
   const multipart = bodyMode === 'multipart' ? buildVideoMultipartBody(cfg, model, request) : undefined;
+  const url = method === 'GET' && body
+    ? appendQueryParams(resolveVideoSubmitUrl(cfg, model, request), buildQueryParamsFromRequestBody(body))
+    : resolveVideoSubmitUrl(cfg, model, request);
 
   return {
     providerLabel: cfg.label,
@@ -1862,6 +1925,11 @@ function getValueByPath(payload: unknown, rawPath: unknown): unknown {
     }
   }
   return current;
+}
+
+function valueAtPath(payload: unknown, rawPath: string): unknown {
+  const direct = getValueByPath(payload, rawPath);
+  return direct === null ? undefined : direct;
 }
 
 function parseNestedJsonString(value: string): unknown | null {
@@ -2273,7 +2341,11 @@ function scanFirstVideoSource(cfg: CustomProviderConfig, payload: unknown): stri
 }
 
 function extractFirstVideoSource(cfg: CustomProviderConfig, payload: unknown): string | null {
+  const configuredVideoPaths = Array.isArray(cfg.extraParams?.responseVideoPaths)
+    ? cfg.extraParams.responseVideoPaths
+    : [];
   const hintedPaths = [
+    ...configuredVideoPaths,
     cfg.extraParams?.responseVideoPath,
     cfg.extraParams?.responseVideoUrlPath,
     cfg.extraParams?.videoPath,
@@ -2322,8 +2394,8 @@ function buildVideoRequestFields(
   modelName: string,
   request: GenerateRequest,
 ): Record<string, unknown> {
-  const defaultRequestParams = resolveDefaultRequestParams(cfg);
-  const userExtra = { ...(request.extra_params ?? {}) } as Record<string, unknown>;
+  const defaultRequestParams = cloneJsonLike(resolveDefaultRequestParams(cfg));
+  const userExtra = cloneJsonLike({ ...(request.extra_params ?? {}) } as Record<string, unknown>);
   const seconds =
     userExtra.seconds
     ?? userExtra.duration
@@ -2337,6 +2409,13 @@ function buildVideoRequestFields(
   delete userExtra.reference_images;
   delete userExtra.input_reference;
   delete userExtra.inputReference;
+  delete userExtra.videoInputSchema;
+  delete userExtra.reference_videos;
+  delete userExtra.referenceVideos;
+  delete userExtra.video_references;
+  delete userExtra.reference_audios;
+  delete userExtra.referenceAudios;
+  delete userExtra.audio_references;
 
   return compactRecord({
     model: modelName,
@@ -2346,6 +2425,257 @@ function buildVideoRequestFields(
     ...defaultRequestParams,
     ...userExtra,
   });
+}
+
+function buildVideoTemplateContext(
+  cfg: CustomProviderConfig,
+  modelName: string,
+  request: GenerateRequest,
+): Record<string, unknown> {
+  const defaultRequestParams = resolveDefaultRequestParams(cfg);
+  const userExtra = { ...(request.extra_params ?? {}) } as Record<string, unknown>;
+  const seconds =
+    userExtra.seconds
+    ?? userExtra.duration
+    ?? defaultRequestParams.seconds
+    ?? defaultRequestParams.duration;
+  const size = request.extra_params?.resolutionType ?? request.extra_params?.size ?? request.size;
+  const images = request.reference_images ?? [];
+  const videos = request.reference_videos ?? [];
+  const audios = request.reference_audios ?? [];
+  return {
+    model: modelName,
+    modelName,
+    prompt: request.prompt,
+    size,
+    resolution: size,
+    seconds,
+    duration: seconds,
+    aspect_ratio: request.aspect_ratio,
+    aspectRatio: request.aspect_ratio,
+    images,
+    reference_images: images,
+    referenceImages: images,
+    firstImage: images[0],
+    firstFrame: images[0],
+    lastFrame: images.length > 1 ? images[images.length - 1] : undefined,
+    videos,
+    reference_videos: videos,
+    referenceVideos: videos,
+    firstVideo: videos[0],
+    audios,
+    audio: audios,
+    reference_audios: audios,
+    referenceAudios: audios,
+    firstAudio: audios[0],
+    defaultRequestParams,
+    extra: userExtra,
+    extra_params: userExtra,
+  };
+}
+
+function resolveTemplateVariable(context: Record<string, unknown>, rawPath: string): unknown {
+  const path = rawPath.trim();
+  if (!path) return undefined;
+  return valueAtPath(context, path);
+}
+
+function applyTemplateVariables(value: unknown, context: Record<string, unknown>): unknown {
+  if (typeof value === 'string') {
+    const exactMatch = /^\{([^{}]+)\}$/.exec(value.trim());
+    if (exactMatch) {
+      const resolved = resolveTemplateVariable(context, exactMatch[1]);
+      return resolved === undefined ? '' : resolved;
+    }
+    return value.replace(/\{([^{}]+)\}/g, (match, rawPath: string) => {
+      const resolved = resolveTemplateVariable(context, rawPath);
+      if (resolved === undefined || resolved === null) return '';
+      if (typeof resolved === 'string' || typeof resolved === 'number' || typeof resolved === 'boolean') {
+        return String(resolved);
+      }
+      try {
+        return JSON.stringify(resolved);
+      } catch {
+        return match;
+      }
+    });
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => applyTemplateVariables(item, context));
+  }
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+        key,
+        applyTemplateVariables(item, context),
+      ])
+    );
+  }
+  return value;
+}
+
+function buildConfiguredVideoRequestBody(
+  cfg: CustomProviderConfig,
+  modelName: string,
+  request: GenerateRequest,
+): Record<string, unknown> | null {
+  const template = cfg.extraParams?.videoRequestBodyTemplate ?? cfg.extraParams?.requestBodyTemplate;
+  if (!template || typeof template !== 'object' || Array.isArray(template)) {
+    return null;
+  }
+  const context = buildVideoTemplateContext(cfg, modelName, request);
+  const body = applyTemplateVariables(cloneJsonLike(template), context);
+  const record = asPlainRecord(body);
+  return record ? compactJsonLike(record) : null;
+}
+
+function stringHint(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function booleanHint(record: Record<string, unknown>, key: string): boolean {
+  return record[key] === true;
+}
+
+function pathValueEquals(value: unknown, expected: string): boolean {
+  return typeof value === 'string'
+    && value.trim().toLowerCase() === expected.trim().toLowerCase();
+}
+
+function resolveVideoBodyHints(cfg: CustomProviderConfig): Record<string, unknown> | null {
+  return asPlainRecord(cfg.extraParams?.videoRequestBodyHints);
+}
+
+function mediaFieldUsesArray(rawField: string): boolean {
+  return referenceImageFieldUsesArray(rawField);
+}
+
+function applyVideoScalarBodyHints(
+  cfg: CustomProviderConfig,
+  body: Record<string, unknown>,
+  modelName: string,
+  request: GenerateRequest,
+  hints: Record<string, unknown>,
+): void {
+  const moveScalar = (fromKey: string, fieldKey: string, value: unknown) => {
+    if (!Object.prototype.hasOwnProperty.call(hints, fieldKey)) return;
+    const targetField = stringHint(hints, fieldKey);
+    delete body[fromKey];
+    if (targetField) {
+      setBodyValueIfPresent(body, targetField, value);
+    }
+  };
+
+  moveScalar('model', 'modelField', modelName);
+  moveScalar('prompt', 'promptField', request.prompt);
+
+  const sizeValue = request.extra_params?.resolutionType ?? request.extra_params?.size ?? request.size;
+  moveScalar('size', 'sizeField', sizeValue);
+  moveScalar('aspect_ratio', 'aspectRatioField', request.aspect_ratio);
+
+  if (Object.prototype.hasOwnProperty.call(hints, 'secondsField')) {
+    const secondsField = stringHint(hints, 'secondsField');
+    const rawSeconds = body.seconds ?? request.extra_params?.seconds ?? request.extra_params?.duration;
+    delete body.seconds;
+    delete body.duration;
+    if (secondsField) {
+      const secondsValue = booleanHint(hints, 'secondsAsString') && rawSeconds !== undefined && rawSeconds !== null
+        ? String(rawSeconds)
+        : rawSeconds;
+      setBodyValueIfPresent(body, secondsField, secondsValue);
+    }
+  } else if (booleanHint(hints, 'secondsAsString') && body.seconds !== undefined && body.seconds !== null) {
+    body.seconds = String(body.seconds);
+  }
+
+  const resolutionField = stringHint(hints, 'resolutionField');
+  if (resolutionField) {
+    delete body.resolution;
+    setBodyValueIfPresent(body, resolutionField, sizeValue);
+  }
+
+  const ratioField = stringHint(hints, 'ratioField');
+  if (ratioField) {
+    delete body.ratio;
+    setBodyValueIfPresent(body, ratioField, request.aspect_ratio);
+  }
+
+  const selectedSizeField = stringHint(hints, 'selectedSizeField');
+  if (selectedSizeField) {
+    setBodyValueIfPresent(body, selectedSizeField, resolveHintedSizeValue(cfg, request, sizeValue));
+  }
+}
+
+function applyMediaArrayField(
+  body: Record<string, unknown>,
+  field: string,
+  values: readonly string[],
+): void {
+  if (!field) return;
+  if (values.length === 0) {
+    deleteBodyValue(body, field);
+    return;
+  }
+  setBodyValue(body, field, mediaFieldUsesArray(field) ? [...values] : values[0]);
+}
+
+function applyVideoReferenceBodyHints(
+  body: Record<string, unknown>,
+  request: GenerateRequest,
+  hints: Record<string, unknown>,
+): void {
+  const images = request.reference_images ?? [];
+  const videos = request.reference_videos ?? [];
+  const audios = request.reference_audios ?? [];
+  const hasImageFieldHint = Object.prototype.hasOwnProperty.call(hints, 'imagesField')
+    || Object.prototype.hasOwnProperty.call(hints, 'referenceImageField');
+  const imagesField = hasImageFieldHint
+    ? (stringHint(hints, 'imagesField') || stringHint(hints, 'referenceImageField'))
+    : 'reference_images';
+  const videosField = stringHint(hints, 'videosField') || stringHint(hints, 'videoField');
+  const audioField = stringHint(hints, 'audioField') || stringHint(hints, 'audiosField');
+  const firstFrameField = stringHint(hints, 'firstFrameField');
+  const lastFrameField = stringHint(hints, 'lastFrameField');
+  const modeField = stringHint(hints, 'modeField');
+  const framesModeValue = stringHint(hints, 'framesModeValue') || 'frames';
+  const modeValue = modeField ? getValueByPath(body, modeField) : null;
+  const usesFrameMode =
+    booleanHint(hints, 'useFrameFields')
+    || (modeField && pathValueEquals(modeValue, framesModeValue));
+
+  if (imagesField || firstFrameField || lastFrameField) delete body.reference_images;
+  if (videosField) delete body.reference_videos;
+  if (audioField) delete body.reference_audios;
+
+  if (usesFrameMode && (firstFrameField || lastFrameField)) {
+    if (imagesField) deleteBodyValue(body, imagesField);
+    if (videosField) deleteBodyValue(body, videosField);
+    if (audioField) deleteBodyValue(body, audioField);
+    setBodyValueIfPresent(body, firstFrameField, images[0]);
+    setBodyValueIfPresent(body, lastFrameField, images[1]);
+    return;
+  }
+
+  if (firstFrameField) deleteBodyValue(body, firstFrameField);
+  if (lastFrameField) deleteBodyValue(body, lastFrameField);
+  applyMediaArrayField(body, imagesField, images);
+  applyMediaArrayField(body, videosField, videos);
+  applyMediaArrayField(body, audioField, audios);
+}
+
+function applyVideoRequestBodyHints(
+  cfg: CustomProviderConfig,
+  body: Record<string, unknown>,
+  modelName: string,
+  request: GenerateRequest,
+): Record<string, unknown> {
+  const hints = resolveVideoBodyHints(cfg);
+  if (!hints) return body;
+  const next = cloneJsonLike(body);
+  applyVideoScalarBodyHints(cfg, next, modelName, request, hints);
+  applyVideoReferenceBodyHints(next, request, hints);
+  return compactRecord(next);
 }
 
 function resolveVideoSeconds(
@@ -2503,6 +2833,7 @@ function buildAgnesVideoJsonBody(
   delete userExtra.inputReference;
   delete userExtra.image;
   delete userExtra.images;
+  delete userExtra.videoInputSchema;
   delete userExtra.mode;
   delete userExtra.videoMode;
   delete userExtra.agnesVideoMode;
@@ -2562,6 +2893,7 @@ function buildXaiVideoJsonBody(
   delete userExtra.input_reference;
   delete userExtra.inputReference;
   delete userExtra.image;
+  delete userExtra.videoInputSchema;
 
   return compactRecord({
     model: modelName,
@@ -2595,6 +2927,7 @@ function buildVolcengineSeedanceVideoJsonBody(
   delete userExtra.reference_images;
   delete userExtra.input_reference;
   delete userExtra.inputReference;
+  delete userExtra.videoInputSchema;
 
   const content = [
     ...referenceImages.map((url) => ({
@@ -2656,6 +2989,10 @@ function buildVideoJsonBody(
   request: GenerateRequest,
 ): Record<string, unknown> {
   const providerKind = modernProviderKind(cfg);
+  const configuredBody = buildConfiguredVideoRequestBody(cfg, modelName, request);
+  if (configuredBody) {
+    return configuredBody;
+  }
   if (providerKind === 'agnes-video') {
     return buildAgnesVideoJsonBody(cfg, modelName, request);
   }
@@ -2668,11 +3005,32 @@ function buildVideoJsonBody(
 
   const body = buildVideoRequestFields(cfg, modelName, request);
   const references = request.reference_images ?? [];
+  if (resolveVideoBodyHints(cfg)) {
+    return applyVideoRequestBodyHints(cfg, body, modelName, request);
+  }
   if (references.length > 0) {
     const fieldName = typeof cfg.extraParams?.videoReferenceField === 'string' && cfg.extraParams.videoReferenceField.trim()
       ? cfg.extraParams.videoReferenceField.trim()
       : 'reference_images';
     body[fieldName] = references.length === 1 ? references[0] : references;
+  }
+  const videos = request.reference_videos ?? [];
+  if (videos.length > 0) {
+    const fieldName = typeof cfg.extraParams?.videoInputSchema === 'object'
+      ? String((cfg.extraParams.videoInputSchema as { video?: { field?: unknown } }).video?.field ?? '').trim()
+      : '';
+    if (fieldName) {
+      setBodyValue(body, fieldName, videos.length === 1 ? videos[0] : videos);
+    }
+  }
+  const audios = request.reference_audios ?? [];
+  if (audios.length > 0) {
+    const fieldName = typeof cfg.extraParams?.videoInputSchema === 'object'
+      ? String((cfg.extraParams.videoInputSchema as { audio?: { field?: unknown } }).audio?.field ?? '').trim()
+      : '';
+    if (fieldName) {
+      setBodyValue(body, fieldName, audios.length === 1 ? audios[0] : audios);
+    }
   }
   return body;
 }
@@ -2699,23 +3057,25 @@ async function sendVideoGenerationRequest(
   request: GenerateRequest,
 ): Promise<unknown> {
   const method = cfg.httpMethod ?? 'POST';
-  if (method !== 'POST') {
-    throw new Error('视频生成接口当前仅支持 POST 提交任务。请将 httpMethod 设置为 POST。');
-  }
   if (cfg.extraParams?.requiresDedicatedVideoGateway === true) {
     throw new Error(`${cfg.label} 的视频格式需要专用 gateway 组装请求体，当前模板仅保存官方字段元数据，不能直接提交。`);
   }
-  const url = resolveVideoSubmitUrl(cfg, model, request);
   const bodyMode = resolveVideoRequestBodyMode(cfg);
+  if (method === 'GET' && bodyMode === 'multipart') {
+    throw new Error('视频生成 GET 接口不能使用 multipart/form-data，请将请求格式改为 JSON 查询参数。');
+  }
   const headers = buildRequestHeaders(cfg, bodyMode, method);
   const multipart = bodyMode === 'multipart' ? buildVideoMultipartBody(cfg, model, request) : undefined;
   const body = bodyMode === 'json' ? buildVideoJsonBody(cfg, model, request) : undefined;
+  const url = method === 'GET' && body
+    ? appendQueryParams(resolveVideoSubmitUrl(cfg, model, request), buildQueryParamsFromRequestBody(body))
+    : resolveVideoSubmitUrl(cfg, model, request);
   const { parsed } = await requestJson(url, {
     method,
     headers,
     bodyMode,
-    body,
-    multipart,
+    body: method === 'POST' ? body : undefined,
+    multipart: method === 'POST' ? multipart : undefined,
     timeoutMs: GENERATION_REQUEST_TIMEOUT_MS,
     networkErrorPrefix: GENERATION_SUBMIT_NETWORK_ERROR_PREFIX,
     networkRetryAttempts: GENERATION_SUBMIT_NETWORK_RETRY_ATTEMPTS,
@@ -2732,6 +3092,28 @@ function resolveVideoStatusEndpointPath(cfg: CustomProviderConfig): string {
   const submitPath = (cfg.endpointPath ?? resolveDefaultOpenAiVideoEndpointPath(cfg)).trim()
     || resolveDefaultOpenAiVideoEndpointPath(cfg);
   return `${submitPath.replace(/\/+$/, '')}/{taskId}`;
+}
+
+function resolveVideoStatusMethod(cfg: CustomProviderConfig): 'GET' | 'POST' {
+  const raw = String(cfg.extraParams?.videoStatusMethod ?? cfg.extraParams?.videoPollMethod ?? 'GET').toUpperCase();
+  return raw === 'POST' ? 'POST' : 'GET';
+}
+
+function resolveVideoStatusRequestBody(cfg: CustomProviderConfig, taskId: string): unknown {
+  const template = cfg.extraParams?.videoStatusRequestBody ?? cfg.extraParams?.videoPollRequestBody;
+  return template === undefined ? undefined : fillTaskTemplate(template, taskId);
+}
+
+function resolveVideoStatusQueryParams(cfg: CustomProviderConfig, taskId: string): Record<string, string> {
+  const template = cfg.extraParams?.videoStatusQueryParams ?? cfg.extraParams?.videoPollQueryParams;
+  const filled = template === undefined ? undefined : fillTaskTemplate(template, taskId);
+  const record = asPlainRecord(filled);
+  if (!record) return {};
+  return Object.fromEntries(
+    Object.entries(record)
+      .map(([key, value]) => [key, queryParamValue(value)] as const)
+      .filter((entry): entry is readonly [string, string] => Boolean(entry[0].trim()) && entry[1] !== null)
+  );
 }
 
 async function resolveGeneratedVideoSource(
@@ -2781,6 +3163,9 @@ async function pollGeneratedVideoTask(
     ? Math.max(5000, Number(cfg.extraParams?.videoPollTimeoutMs))
     : VIDEO_POLL_TIMEOUT_MS;
   const statusEndpointPath = resolveVideoStatusEndpointPath(cfg);
+  const statusMethod = resolveVideoStatusMethod(cfg);
+  const statusRequestBody = resolveVideoStatusRequestBody(cfg, taskId);
+  const statusQueryParams = resolveVideoStatusQueryParams(cfg, taskId);
   const startedAt = Date.now();
   let pollCount = 0;
   let consecutiveNetworkFailures = 0;
@@ -2793,15 +3178,20 @@ async function pollGeneratedVideoTask(
 
     let payload: unknown;
     try {
-      const response = await requestJson(resolveAsyncTaskUrl(cfg, statusEndpointPath, taskId), {
-        method: 'GET',
-        headers: buildRequestHeaders(cfg, 'json', 'GET'),
+      const response = await requestJson(
+        appendQueryParams(resolveAsyncTaskUrl(cfg, statusEndpointPath, taskId), statusQueryParams),
+        {
+        method: statusMethod,
+        bodyMode: 'json',
+        body: statusMethod === 'POST' ? statusRequestBody : undefined,
+        headers: buildRequestHeaders(cfg, 'json', statusMethod),
         timeoutMs: RESULT_POLL_REQUEST_TIMEOUT_MS,
         errorPrefix: '视频状态轮询失败 HTTP',
         networkRetryAttempts: RESULT_POLL_NETWORK_RETRY_ATTEMPTS,
         networkRetryDelayMs: 700,
         retryHttpStatuses: RESULT_POLL_RETRY_HTTP_STATUSES,
-      });
+        }
+      );
       payload = response.parsed;
       consecutiveNetworkFailures = 0;
     } catch (err) {

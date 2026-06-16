@@ -4,14 +4,18 @@ import { useTranslation } from 'react-i18next';
 import { getVersion } from '@tauri-apps/api/app';
 import { open } from '@tauri-apps/plugin-dialog';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { customHttpRequest } from '@/commands/ai';
 import {
   DEFAULT_CANVAS_MOUSE_BINDINGS,
   TRADITIONAL_CANVAS_MOUSE_BINDINGS,
+  DEFAULT_IMAGE_HOST_SETTINGS,
   useSettingsStore,
   type CanvasMouseAction,
   type CanvasMouseBindingPreset,
   type CanvasMouseBindingSlot,
   type CanvasMouseBindings,
+  type ImageHostProvider,
+  type ImageHostSettings,
   type PanoramaControlSensitivity,
 } from '@/stores/settingsStore';
 import { UiCheckbox, UiSelect } from '@/components/ui';
@@ -26,6 +30,7 @@ import { DreaminaSection } from '@/components/settings/DreaminaSection';
 import { PromptManagementSection } from '@/components/settings/PromptManagementSection';
 import { PromptPresetsSection } from '@/components/settings/PromptPresetsSection';
 import { TextAgentsSection } from '@/components/settings/TextAgentsSection';
+import { AudioModelsSection } from '@/components/settings/AudioModelsSection';
 
 interface SettingsDialogProps {
   isOpen: boolean;
@@ -40,6 +45,13 @@ interface SettingsCheckboxCardProps {
   checked: boolean;
   onCheckedChange: (checked: boolean) => void;
 }
+
+type ImageHostSettingsPatch =
+  Partial<Omit<ImageHostSettings, 'pixhost' | 'seedvault'>>
+  & {
+    pixhost?: Partial<ImageHostSettings['pixhost']>;
+    seedvault?: Partial<ImageHostSettings['seedvault']>;
+  };
 
 const _UNUSED_PROVIDER_URLS_KEPT_FOR_FUTURE_USE: Record<string, string> = {
   ppio: 'https://ppio.com/user/register?invited_by=WGY0DZ',
@@ -70,6 +82,7 @@ const CANVAS_MOUSE_ACTIONS: CanvasMouseAction[] = [
   'selectionBox',
   'nodeMenu',
 ];
+const IMAGE_HOST_PROVIDERS: ImageHostProvider[] = ['pixhost', 'seedvault'];
 
 function normalizeSettingsCategory(category: SettingsCategory): SettingsCategory {
   if (category === 'providers' || category === 'providersNew' || category === 'providersOld' || category === 'providersChat') {
@@ -86,6 +99,83 @@ function providerTabFromSettingsCategory(category: SettingsCategory): AddProvide
     return 'chat';
   }
   return 'imageNew';
+}
+
+function cloneImageHostSettings(settings: ImageHostSettings): ImageHostSettings {
+  return {
+    enabled: settings.enabled,
+    provider: settings.provider,
+    pixhost: { ...settings.pixhost },
+    seedvault: { ...settings.seedvault },
+  };
+}
+
+function joinApiPath(baseUrl: string, path: string): string {
+  return `${baseUrl.trim().replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`;
+}
+
+function extractSeedvaultToken(responseText: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(responseText);
+  } catch {
+    throw new Error('settings.imageHosting.errors.invalidTokenResponse');
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('settings.imageHosting.errors.invalidTokenResponse');
+  }
+
+  const data = (parsed as { data?: unknown }).data;
+  const token = data && typeof data === 'object'
+    ? (data as { token?: unknown }).token
+    : undefined;
+  if (typeof token !== 'string' || !token.trim()) {
+    throw new Error('settings.imageHosting.errors.invalidTokenResponse');
+  }
+  return token.trim();
+}
+
+function hasSeedvaultCredentialsChanged(
+  nextSettings: ImageHostSettings,
+  savedSettings: ImageHostSettings
+): boolean {
+  const nextEmail = nextSettings.seedvault.email.trim();
+  const savedEmail = savedSettings.seedvault.email.trim();
+  return (
+    nextEmail.length > 0
+    && nextSettings.seedvault.password.length > 0
+    && (
+      nextEmail !== savedEmail
+      || nextSettings.seedvault.password !== savedSettings.seedvault.password
+      || !savedSettings.seedvault.token.trim()
+    )
+  );
+}
+
+async function requestSeedvaultToken(settings: ImageHostSettings): Promise<string> {
+  const email = settings.seedvault.email.trim();
+  const password = settings.seedvault.password;
+  if (!email || !password) {
+    throw new Error('settings.imageHosting.errors.missingSeedvaultCredentials');
+  }
+
+  const response = await customHttpRequest({
+    url: joinApiPath(settings.seedvault.apiBaseUrl, '/tokens'),
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+    },
+    bodyMode: 'json',
+    body: { email, password },
+    timeoutMs: 30000,
+  });
+
+  if (response.status < 200 || response.status >= 300) {
+    throw new Error('settings.imageHosting.errors.tokenRequestFailed');
+  }
+
+  return extractSeedvaultToken(response.text);
 }
 
 function SettingsCheckboxCard({
@@ -157,6 +247,7 @@ export function SettingsDialog({
     canvasEdgeRoutingMode,
     autoCheckAppUpdateOnLaunch,
     enableUpdateDialog,
+    imageHostSettings,
     setProviderApiKey,
     setGrsaiNanoBananaProModel,
     setDownloadPresetPaths,
@@ -183,6 +274,7 @@ export function SettingsDialog({
     setCanvasEdgeRoutingMode,
     setAutoCheckAppUpdateOnLaunch,
     setEnableUpdateDialog,
+    setImageHostSettings,
   } = useSettingsStore();
   const providers = useMemo(() => {
     // Per product decision: only GRSAI is a built-in provider for now. The
@@ -249,6 +341,12 @@ export function SettingsDialog({
     autoCheckAppUpdateOnLaunch
   );
   const [localEnableUpdateDialog, setLocalEnableUpdateDialog] = useState(enableUpdateDialog);
+  const [localImageHostSettings, setLocalImageHostSettings] = useState<ImageHostSettings>(
+    () => cloneImageHostSettings(imageHostSettings ?? DEFAULT_IMAGE_HOST_SETTINGS)
+  );
+  const [forceSeedvaultTokenRefresh, setForceSeedvaultTokenRefresh] = useState(false);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [settingsSaveError, setSettingsSaveError] = useState<string>('');
   const [checkUpdateStatus, setCheckUpdateStatus] = useState<'' | 'checking' | 'has-update' | 'up-to-date' | 'failed'>('');
   const [settingsSaved, setSettingsSaved] = useState(false);
   const { shouldRender, isVisible } = useDialogTransition(isOpen, UI_DIALOG_TRANSITION_MS);
@@ -303,6 +401,10 @@ export function SettingsDialog({
     setLocalCanvasEdgeRoutingMode(canvasEdgeRoutingMode);
     setLocalAutoCheckAppUpdateOnLaunch(autoCheckAppUpdateOnLaunch);
     setLocalEnableUpdateDialog(enableUpdateDialog);
+    setLocalImageHostSettings(cloneImageHostSettings(imageHostSettings ?? DEFAULT_IMAGE_HOST_SETTINGS));
+    setForceSeedvaultTokenRefresh(false);
+    setSettingsSaveError('');
+    setIsSavingSettings(false);
     setCheckUpdateStatus('');
     setLocalDownloadPathInput('');
   }, [
@@ -318,41 +420,87 @@ export function SettingsDialog({
     setActiveProviderAddTab(providerTabFromSettingsCategory(initialCategory));
   }, [initialCategory, isOpen]);
 
-  const handleSave = useCallback(() => {
-    providers.forEach((provider) => {
-      setProviderApiKey(provider.id, localApiKeys[provider.id] ?? '');
-    });
-    setGrsaiNanoBananaProModel(localGrsaiNanoBananaProModel);
-    setDownloadPresetPaths(localDownloadPresetPaths);
-    setUseUploadFilenameAsNodeTitle(localUseUploadFilenameAsNodeTitle);
-    setStoryboardGenKeepStyleConsistent(localStoryboardGenKeepStyleConsistent);
-    setStoryboardGenDisableTextInImage(localStoryboardGenDisableTextInImage);
-    setStoryboardGenAutoInferEmptyFrame(localStoryboardGenAutoInferEmptyFrame);
-    setIgnoreAtTagWhenCopyingAndGenerating(localIgnoreAtTagWhenCopyingAndGenerating);
-    setAppendParameterConstraintsToPrompt(localAppendParameterConstraintsToPrompt);
-    setCollapseNodeActionToolbarByDefault(localCollapseNodeActionToolbarByDefault);
-    setShowNodePayloadPreview(localShowNodePayloadPreview);
-    setEnableAiTextStreaming(localEnableAiTextStreaming);
-    setEnableStoryboardGenGridPreviewShortcut(localEnableStoryboardGenGridPreviewShortcut);
-    setShowStoryboardGenAdvancedRatioControls(localShowStoryboardGenAdvancedRatioControls);
-    setUseLegacyPanoramaControlDirection(localUseLegacyPanoramaControlDirection);
-    setPanoramaControlSensitivity(localPanoramaControlSensitivity);
-    if (localCanvasMouseBindingPreset === 'custom') {
-      setCanvasMouseBindings(localCanvasMouseBindings);
-    } else {
-      setCanvasMouseBindingPreset(localCanvasMouseBindingPreset);
+  const handleSave = useCallback(async () => {
+    if (isSavingSettings) {
+      return;
     }
-    setEnableCanvasWasdPan(localEnableCanvasWasdPan);
-    setCanvasWasdPanSensitivity(localCanvasWasdPanSensitivity);
-    setUiRadiusPreset(localUiRadiusPreset);
-    setThemeTonePreset(localThemeTonePreset);
-    setAccentColor(localAccentColor);
-    setCanvasEdgeRoutingMode(localCanvasEdgeRoutingMode);
-    setAutoCheckAppUpdateOnLaunch(localAutoCheckAppUpdateOnLaunch);
-    setEnableUpdateDialog(localEnableUpdateDialog);
-    setSettingsSaved(true);
-    window.setTimeout(() => setSettingsSaved(false), 1500);
+
+    setIsSavingSettings(true);
+    setSettingsSaveError('');
+    try {
+      const nextImageHostSettings = cloneImageHostSettings(localImageHostSettings);
+      const hasSeedvaultCredentialPair = Boolean(
+        nextImageHostSettings.seedvault.email.trim()
+        && nextImageHostSettings.seedvault.password
+      );
+      const shouldRefreshSeedvaultToken =
+        nextImageHostSettings.provider === 'seedvault'
+        && hasSeedvaultCredentialPair
+        && (
+          forceSeedvaultTokenRefresh
+          || hasSeedvaultCredentialsChanged(nextImageHostSettings, imageHostSettings)
+        );
+
+      if (shouldRefreshSeedvaultToken) {
+        nextImageHostSettings.seedvault.token = await requestSeedvaultToken(nextImageHostSettings);
+      }
+      if (
+        nextImageHostSettings.enabled
+        && nextImageHostSettings.provider === 'seedvault'
+        && !nextImageHostSettings.seedvault.token.trim()
+      ) {
+        throw new Error('settings.imageHosting.errors.missingSeedvaultCredentials');
+      }
+
+      providers.forEach((provider) => {
+        setProviderApiKey(provider.id, localApiKeys[provider.id] ?? '');
+      });
+      setGrsaiNanoBananaProModel(localGrsaiNanoBananaProModel);
+      setDownloadPresetPaths(localDownloadPresetPaths);
+      setUseUploadFilenameAsNodeTitle(localUseUploadFilenameAsNodeTitle);
+      setStoryboardGenKeepStyleConsistent(localStoryboardGenKeepStyleConsistent);
+      setStoryboardGenDisableTextInImage(localStoryboardGenDisableTextInImage);
+      setStoryboardGenAutoInferEmptyFrame(localStoryboardGenAutoInferEmptyFrame);
+      setIgnoreAtTagWhenCopyingAndGenerating(localIgnoreAtTagWhenCopyingAndGenerating);
+      setAppendParameterConstraintsToPrompt(localAppendParameterConstraintsToPrompt);
+      setCollapseNodeActionToolbarByDefault(localCollapseNodeActionToolbarByDefault);
+      setShowNodePayloadPreview(localShowNodePayloadPreview);
+      setEnableAiTextStreaming(localEnableAiTextStreaming);
+      setEnableStoryboardGenGridPreviewShortcut(localEnableStoryboardGenGridPreviewShortcut);
+      setShowStoryboardGenAdvancedRatioControls(localShowStoryboardGenAdvancedRatioControls);
+      setUseLegacyPanoramaControlDirection(localUseLegacyPanoramaControlDirection);
+      setPanoramaControlSensitivity(localPanoramaControlSensitivity);
+      if (localCanvasMouseBindingPreset === 'custom') {
+        setCanvasMouseBindings(localCanvasMouseBindings);
+      } else {
+        setCanvasMouseBindingPreset(localCanvasMouseBindingPreset);
+      }
+      setEnableCanvasWasdPan(localEnableCanvasWasdPan);
+      setCanvasWasdPanSensitivity(localCanvasWasdPanSensitivity);
+      setUiRadiusPreset(localUiRadiusPreset);
+      setThemeTonePreset(localThemeTonePreset);
+      setAccentColor(localAccentColor);
+      setCanvasEdgeRoutingMode(localCanvasEdgeRoutingMode);
+      setAutoCheckAppUpdateOnLaunch(localAutoCheckAppUpdateOnLaunch);
+      setEnableUpdateDialog(localEnableUpdateDialog);
+      setImageHostSettings(nextImageHostSettings);
+      setLocalImageHostSettings(nextImageHostSettings);
+      setForceSeedvaultTokenRefresh(false);
+      setSettingsSaved(true);
+      window.setTimeout(() => setSettingsSaved(false), 1500);
+    } catch (error) {
+      const messageKey = error instanceof Error ? error.message : '';
+      const fallback = t('settings.imageHosting.errors.saveFailed');
+      setSettingsSaveError(
+        messageKey.startsWith('settings.')
+          ? t(messageKey)
+          : (messageKey || fallback)
+      );
+    } finally {
+      setIsSavingSettings(false);
+    }
   }, [
+    isSavingSettings,
     localApiKeys,
     localDownloadPresetPaths,
     localGrsaiNanoBananaProModel,
@@ -379,7 +527,11 @@ export function SettingsDialog({
     localCanvasEdgeRoutingMode,
     localAutoCheckAppUpdateOnLaunch,
     localEnableUpdateDialog,
+    localImageHostSettings,
+    forceSeedvaultTokenRefresh,
+    imageHostSettings,
     providers,
+    t,
     setProviderApiKey,
     setGrsaiNanoBananaProModel,
     setDownloadPresetPaths,
@@ -406,6 +558,7 @@ export function SettingsDialog({
     setCanvasEdgeRoutingMode,
     setAutoCheckAppUpdateOnLaunch,
     setEnableUpdateDialog,
+    setImageHostSettings,
   ]);
 
   const handleOpenRepository = useCallback(() => {
@@ -463,6 +616,35 @@ export function SettingsDialog({
   const handleRemoveDownloadPath = useCallback((path: string) => {
     setLocalDownloadPresetPaths((previous) => previous.filter((value) => value !== path));
   }, []);
+
+  const updateLocalImageHostSettings = useCallback((patch: ImageHostSettingsPatch) => {
+    setLocalImageHostSettings((previous) => ({
+      ...previous,
+      ...patch,
+      pixhost: {
+        ...previous.pixhost,
+        ...(patch.pixhost ?? {}),
+      },
+      seedvault: {
+        ...previous.seedvault,
+        ...(patch.seedvault ?? {}),
+      },
+    }));
+    setSettingsSaveError('');
+  }, []);
+
+  const updateSeedvaultCredentials = useCallback(
+    (patch: Partial<ImageHostSettings['seedvault']>) => {
+      updateLocalImageHostSettings({
+        seedvault: patch,
+      });
+      if (Object.prototype.hasOwnProperty.call(patch, 'email')
+        || Object.prototype.hasOwnProperty.call(patch, 'password')) {
+        setForceSeedvaultTokenRefresh(true);
+      }
+    },
+    [updateLocalImageHostSettings]
+  );
 
   const handleCanvasMousePresetChange = useCallback((preset: CanvasMouseBindingPreset) => {
     setLocalCanvasMouseBindingPreset(preset);
@@ -598,6 +780,34 @@ export function SettingsDialog({
               </button>
 
               <button
+                onClick={() => setActiveCategory('imageHosting')}
+                className={`
+                w-full flex items-center gap-3 px-4 py-2.5 text-left
+                transition-colors
+                ${activeCategory === 'imageHosting'
+                    ? 'bg-accent/10 text-text-dark border-l-2 border-accent'
+                    : 'text-text-muted hover:bg-bg-dark hover:text-text-dark'
+                  }
+              `}
+              >
+                <span className="text-sm">{t('settings.imageHosting.title')}</span>
+              </button>
+
+              <button
+                onClick={() => setActiveCategory('audioModels')}
+                className={`
+                w-full flex items-center gap-3 px-4 py-2.5 text-left
+                transition-colors
+                ${activeCategory === 'audioModels'
+                    ? 'bg-accent/10 text-text-dark border-l-2 border-accent'
+                    : 'text-text-muted hover:bg-bg-dark hover:text-text-dark'
+                  }
+              `}
+              >
+                <span className="text-sm">{t('settings.audioModels.title')}</span>
+              </button>
+
+              <button
                 onClick={() => setActiveCategory('promptManagement')}
                 className={`
                 w-full flex items-center gap-3 px-4 py-2.5 text-left
@@ -721,6 +931,8 @@ export function SettingsDialog({
 
             {activeCategory === 'textAgents' && <TextAgentsSection />}
 
+            {activeCategory === 'audioModels' && <AudioModelsSection />}
+
             {activeCategory === 'providersAdd' && (
               <div className="flex flex-1 flex-col overflow-hidden">
                 <div className="ui-scrollbar flex-1 overflow-y-auto px-6 py-5">
@@ -756,6 +968,269 @@ export function SettingsDialog({
                   </button>
                 </div>
               </div>
+            )}
+
+            {activeCategory === 'imageHosting' && (
+              <>
+                <div className="px-6 py-5 border-b border-border-dark">
+                  <h2 className="text-lg font-semibold text-text-dark">
+                    {t('settings.imageHosting.title')}
+                  </h2>
+                  <p className="text-sm text-text-muted mt-1">
+                    {t('settings.imageHosting.desc')}
+                  </p>
+                </div>
+
+                <div className="ui-scrollbar flex-1 space-y-4 overflow-y-auto p-6">
+                  <div className="rounded-lg border border-border-dark bg-bg-dark p-4">
+                    <div className="flex items-start gap-3">
+                      <UiCheckbox
+                        checked={localImageHostSettings.enabled}
+                        onCheckedChange={(checked) =>
+                          updateLocalImageHostSettings({ enabled: checked })
+                        }
+                        className="mt-0.5 shrink-0"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <h3 className="text-sm font-medium text-text-dark">
+                          {t('settings.imageHosting.enable')}
+                        </h3>
+                        <p className="mt-1 text-xs text-text-muted">
+                          {t('settings.imageHosting.enableDesc')}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-border-dark bg-bg-dark p-4">
+                    <div className="mb-3">
+                      <h3 className="text-sm font-medium text-text-dark">
+                        {t('settings.imageHosting.provider')}
+                      </h3>
+                      <p className="mt-1 text-xs text-text-muted">
+                        {t('settings.imageHosting.providerDesc')}
+                      </p>
+                    </div>
+                    <UiSelect
+                      value={localImageHostSettings.provider}
+                      onChange={(event) =>
+                        updateLocalImageHostSettings({
+                          provider: event.target.value as ImageHostProvider,
+                        })
+                      }
+                      aria-label={t('settings.imageHosting.provider')}
+                    >
+                      {IMAGE_HOST_PROVIDERS.map((provider) => (
+                        <option key={provider} value={provider}>
+                          {t(`settings.imageHosting.providers.${provider}`)}
+                        </option>
+                      ))}
+                    </UiSelect>
+                  </div>
+
+                  <div className="rounded-lg border border-border-dark bg-bg-dark p-4">
+                    <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <h3 className="text-sm font-medium text-text-dark">
+                          {t('settings.imageHosting.pixhost.title')}
+                        </h3>
+                        <p className="mt-1 text-xs text-text-muted">
+                          {t('settings.imageHosting.pixhost.desc')}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="inline-flex h-8 items-center gap-1.5 rounded border border-border-dark bg-surface-dark px-2.5 text-xs text-text-dark transition-colors hover:bg-bg-dark"
+                        onClick={() =>
+                          updateLocalImageHostSettings({
+                            pixhost: { ...DEFAULT_IMAGE_HOST_SETTINGS.pixhost },
+                          })
+                        }
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        {t('settings.imageHosting.restoreDefaults')}
+                      </button>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="text-xs font-medium text-text-muted sm:col-span-2">
+                        {t('settings.imageHosting.apiBaseUrl')}
+                        <input
+                          value={localImageHostSettings.pixhost.apiBaseUrl}
+                          onChange={(event) =>
+                            updateLocalImageHostSettings({
+                              pixhost: { apiBaseUrl: event.target.value },
+                            })
+                          }
+                          placeholder="https://api.pixhost.to"
+                          className="mt-1 h-9 w-full rounded border border-border-dark bg-surface-dark px-3 text-sm text-text-dark outline-none placeholder:text-text-muted"
+                        />
+                      </label>
+
+                      <label className="text-xs font-medium text-text-muted">
+                        {t('settings.imageHosting.pixhost.contentType')}
+                        <UiSelect
+                          value={localImageHostSettings.pixhost.contentType}
+                          onChange={(event) =>
+                            updateLocalImageHostSettings({
+                              pixhost: { contentType: event.target.value },
+                            })
+                          }
+                          className="mt-1"
+                          aria-label={t('settings.imageHosting.pixhost.contentType')}
+                        >
+                          <option value="0">{t('settings.imageHosting.pixhost.contentTypes.family')}</option>
+                          <option value="1">{t('settings.imageHosting.pixhost.contentTypes.adult')}</option>
+                        </UiSelect>
+                      </label>
+
+                      <label className="text-xs font-medium text-text-muted">
+                        {t('settings.imageHosting.pixhost.maxThumbnailSize')}
+                        <input
+                          type="number"
+                          min={100}
+                          max={500}
+                          step={10}
+                          value={localImageHostSettings.pixhost.maxThumbnailSize}
+                          onChange={(event) =>
+                            updateLocalImageHostSettings({
+                              pixhost: { maxThumbnailSize: event.target.value },
+                            })
+                          }
+                          className="mt-1 h-9 w-full rounded border border-border-dark bg-surface-dark px-3 text-sm text-text-dark outline-none placeholder:text-text-muted"
+                        />
+                      </label>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-border-dark bg-bg-dark p-4">
+                    <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+                      <div>
+                        <h3 className="text-sm font-medium text-text-dark">
+                          {t('settings.imageHosting.seedvault.title')}
+                        </h3>
+                        <p className="mt-1 text-xs text-text-muted">
+                          {t('settings.imageHosting.seedvault.desc')}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        className="inline-flex h-8 items-center gap-1.5 rounded border border-border-dark bg-surface-dark px-2.5 text-xs text-text-dark transition-colors hover:bg-bg-dark"
+                        onClick={() =>
+                          updateLocalImageHostSettings({
+                            seedvault: { ...DEFAULT_IMAGE_HOST_SETTINGS.seedvault },
+                          })
+                        }
+                      >
+                        <RotateCcw className="h-3.5 w-3.5" />
+                        {t('settings.imageHosting.restoreDefaults')}
+                      </button>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <label className="text-xs font-medium text-text-muted sm:col-span-2">
+                        {t('settings.imageHosting.apiBaseUrl')}
+                        <input
+                          value={localImageHostSettings.seedvault.apiBaseUrl}
+                          onChange={(event) =>
+                            updateLocalImageHostSettings({
+                              seedvault: { apiBaseUrl: event.target.value },
+                            })
+                          }
+                          placeholder="https://img.seedvault.cn/api/v1"
+                          className="mt-1 h-9 w-full rounded border border-border-dark bg-surface-dark px-3 text-sm text-text-dark outline-none placeholder:text-text-muted"
+                        />
+                      </label>
+
+                      <label className="text-xs font-medium text-text-muted">
+                        {t('settings.imageHosting.seedvault.email')}
+                        <input
+                          type="email"
+                          value={localImageHostSettings.seedvault.email}
+                          onChange={(event) =>
+                            updateSeedvaultCredentials({ email: event.target.value })
+                          }
+                          autoComplete="username"
+                          className="mt-1 h-9 w-full rounded border border-border-dark bg-surface-dark px-3 text-sm text-text-dark outline-none placeholder:text-text-muted"
+                        />
+                      </label>
+
+                      <label className="text-xs font-medium text-text-muted">
+                        {t('settings.imageHosting.seedvault.password')}
+                        <input
+                          type="password"
+                          value={localImageHostSettings.seedvault.password}
+                          onChange={(event) =>
+                            updateSeedvaultCredentials({ password: event.target.value })
+                          }
+                          autoComplete="current-password"
+                          className="mt-1 h-9 w-full rounded border border-border-dark bg-surface-dark px-3 text-sm text-text-dark outline-none placeholder:text-text-muted"
+                        />
+                      </label>
+
+                      <label className="text-xs font-medium text-text-muted">
+                        {t('settings.imageHosting.seedvault.strategyId')}
+                        <input
+                          value={localImageHostSettings.seedvault.strategyId}
+                          onChange={(event) =>
+                            updateLocalImageHostSettings({
+                              seedvault: { strategyId: event.target.value },
+                            })
+                          }
+                          placeholder={t('settings.imageHosting.seedvault.strategyIdPlaceholder')}
+                          className="mt-1 h-9 w-full rounded border border-border-dark bg-surface-dark px-3 text-sm text-text-dark outline-none placeholder:text-text-muted"
+                        />
+                      </label>
+
+                      <label className="text-xs font-medium text-text-muted">
+                        {t('settings.imageHosting.seedvault.token')}
+                        <input
+                          value={localImageHostSettings.seedvault.token}
+                          onChange={(event) =>
+                            updateLocalImageHostSettings({
+                              seedvault: { token: event.target.value },
+                            })
+                          }
+                          placeholder={t('settings.imageHosting.seedvault.tokenPlaceholder')}
+                          className="mt-1 h-9 w-full rounded border border-border-dark bg-surface-dark px-3 text-sm text-text-dark outline-none placeholder:text-text-muted"
+                        />
+                      </label>
+                    </div>
+
+                    <p className="mt-3 text-xs leading-5 text-text-muted">
+                      {forceSeedvaultTokenRefresh
+                        ? t('settings.imageHosting.seedvault.tokenWillRefresh')
+                        : t('settings.imageHosting.seedvault.tokenHint')}
+                    </p>
+                  </div>
+
+                  {settingsSaveError && (
+                    <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-200">
+                      {settingsSaveError}
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex justify-end gap-2 border-t border-border-dark px-6 py-4">
+                  {settingsSaved && <span className="mr-auto inline-flex items-center gap-1 text-xs text-emerald-400"><CheckCircle2 className="h-3.5 w-3.5" /> {t('common.saved')}</span>}
+                  <button
+                    onClick={onClose}
+                    className="rounded border border-border-dark px-4 py-2 text-sm font-medium text-text-dark transition-colors hover:bg-bg-dark"
+                    disabled={isSavingSettings}
+                  >
+                    {t('common.close')}
+                  </button>
+                  <button
+                    onClick={() => {
+                      void handleSave();
+                    }}
+                    className="rounded bg-accent px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-accent/80 disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={isSavingSettings}
+                  >
+                    {isSavingSettings ? t('common.saving') : t('common.save')}
+                  </button>
+                </div>
+              </>
             )}
 
             {activeCategory === 'appearance' && (

@@ -6,6 +6,8 @@ export interface GenerateRequest {
   size: string;
   aspect_ratio: string;
   reference_images?: string[];
+  reference_videos?: string[];
+  reference_audios?: string[];
   extra_params?: Record<string, unknown>;
 }
 
@@ -59,6 +61,8 @@ function sanitizeGenerateRequestForLog(request: GenerateRequest): Record<string,
     reference_images_preview: (request.reference_images ?? []).map((item) =>
       truncateBase64Like(item)
     ),
+    reference_videos_count: request.reference_videos?.length ?? 0,
+    reference_audios_count: request.reference_audios?.length ?? 0,
     extra_params: request.extra_params ?? {},
   };
 }

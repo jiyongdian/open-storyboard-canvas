@@ -48,6 +48,8 @@ export interface GenerateVideoPayload {
   seconds?: number;
   inputReference?: string;
   referenceImages?: string[];
+  referenceVideos?: string[];
+  referenceAudios?: string[];
   extraParams?: Record<string, unknown>;
 }
 

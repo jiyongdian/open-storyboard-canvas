@@ -258,6 +258,20 @@ export async function saveVideoSourceToDirectory(
   });
 }
 
+export async function saveAudioSourceToPath(
+  source: string,
+  targetPath: string
+): Promise<string> {
+  return await invoke('save_audio_source_to_path', {
+    source,
+    targetPath,
+  });
+}
+
+export async function loadAudioSourceDataUrl(source: string): Promise<string> {
+  return await invoke('load_audio_source_data_url', { source });
+}
+
 export async function saveImageSourceToAppDebugDir(
   source: string,
   category = 'grid',

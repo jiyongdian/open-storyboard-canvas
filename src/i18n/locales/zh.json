@@ -12,6 +12,8 @@
     "edit": "编辑",
     "close": "关闭",
     "loading": "加载中...",
+    "saving": "保存中...",
+    "saved": "已保存",
     "error": "错误",
     "success": "成功",
     "imageMissing": "图片缺失",
@@ -88,6 +90,13 @@
     "retryFetch": "重新获取",
     "downloadSuccess": "下载成功",
     "downloadFailed": "下载失败",
+    "audioTrim": "音频裁剪",
+    "audioTrimDialogTitle": "音频裁剪",
+    "audioTrimStart": "开始秒数",
+    "audioTrimEnd": "结束秒数",
+    "audioTrimApply": "裁剪",
+    "audioTrimming": "裁剪中...",
+    "audioTrimHint": "裁剪会生成一个新的音频节点，原音频不会被覆盖。",
     "ungroup": "解散",
     "saveAs": "另存为...",
     "noDownloadPresetPathsHint": "暂无预设路径，请在设置 - 通用中添加",
@@ -753,6 +762,8 @@
       "aiImageGeneration": "AI 图片",
       "aiVideoGeneration": "AI 视频",
       "aiTextGeneration": "AI 文本",
+      "aiAudioGeneration": "AI 音频",
+      "audio": "音频",
       "storyboard": "分镜节点",
       "storyboardGen": "分镜生成",
       "textAnnotation": "文本节点",
@@ -831,6 +842,29 @@
       "selectModel": "选择模型",
       "noProviderModels": "当前 Provider 还没有可选模型",
       "staleResult": "结果可能已过期"
+    },
+    "aiAudio": {
+      "promptPlaceholder": "输入要文生音频的文字；也可以连接文本节点作为输入",
+      "textRequired": "请输入要生成音频的文字，或连接一个文本节点",
+      "noModel": "请先在设置中配置并启用音频模型",
+      "noVoice": "未同步音色",
+      "generated": "已生成音频结果",
+      "generateFailed": "音频生成失败",
+      "generate": "生成音频",
+      "outputTitle": "音频结果",
+      "textInputCount": "文本输入 {{count}}",
+      "staleResult": "输入已变化，结果可能已过期",
+      "payloadDebug": "预览将发送的音频请求内容",
+      "payloadDebugTitle": "音频 Payload 预览",
+      "payloadDebugHint": "这里展示由音频网关 payload 组装出的真实供应商请求。VoxCPM 会按 Gradio data[] 下标列出字段；data URL 音频会被摘要，并标记实际生成前是否会先上传。"
+    },
+    "audioNode": {
+      "waitingResult": "等待音频生成结果",
+      "generationFailed": "音频生成失败",
+      "empty": "点击或拖拽上传音频",
+      "generationElapsed": "生成耗时",
+      "ready": "可播放",
+      "replace": "替换音频"
     },
     "videoNode": {
       "waitingResult": "等待视频生成结果",
@@ -1066,6 +1100,51 @@
     "generalDesc": "分镜生成、提示词生成和下载路径",
     "keybindings": "键位设置",
     "keybindingsDesc": "配置鼠标操作、画布平移和 WASD 移动习惯",
+    "imageHosting": {
+      "title": "图床配置",
+      "desc": "配置 PiXhost 或私域图床；只有勾选启用后才会使用图床。",
+      "enable": "启用图床",
+      "enableDesc": "关闭时会保留配置，但不会在上传或保存流程中使用图床。",
+      "provider": "图床服务",
+      "providerDesc": "选择当前启用时要使用的图床。",
+      "providers": {
+        "pixhost": "PiXhost",
+        "seedvault": "私域图床"
+      },
+      "apiBaseUrl": "API 根地址 / 域名",
+      "restoreDefaults": "恢复默认",
+      "pixhost": {
+        "title": "PiXhost",
+        "desc": "PiXhost 域名变动时可在这里改 API 根地址。",
+        "contentType": "内容类型",
+        "contentTypes": {
+          "family": "普通内容",
+          "adult": "成人内容"
+        },
+        "maxThumbnailSize": "最大缩略图尺寸"
+      },
+      "seedvault": {
+        "title": "私域图床",
+        "desc": "保存时会通过 /tokens 使用邮箱和密码获取 token，并覆盖当前 token。",
+        "email": "账号邮箱",
+        "password": "密码",
+        "strategyId": "上传策略 ID",
+        "strategyIdPlaceholder": "留空使用默认策略",
+        "token": "Token",
+        "tokenPlaceholder": "保存账号密码后自动生成，也可手动粘贴",
+        "tokenHint": "重新填写账号或密码后，保存时会刷新 token。",
+        "tokenWillRefresh": "账号或密码已修改，保存时将重新生成 token。"
+      },
+      "errors": {
+        "missingSeedvaultCredentials": "请先填写私域图床账号邮箱和密码。",
+        "tokenRequestFailed": "私域图床 token 获取失败，请检查账号、密码和 API 根地址。",
+        "invalidTokenResponse": "私域图床返回的数据中没有可用 token。",
+        "saveFailed": "保存图床配置失败。"
+      }
+    },
+    "audioModels": {
+      "title": "音频模型"
+    },
     "canvasInteraction": {
       "title": "画布操作习惯",
       "desc": "配置鼠标键位、框选、右键菜单和 WASD 画布平移。",
@@ -1276,7 +1355,7 @@
     "collapseNodeActionToolbarByDefault": "图片节点功能条折叠显示",
     "collapseNodeActionToolbarByDefaultDesc": "启用后，AI 图片和图片节点被选中时只显示一个小提示，点击后展开上方功能框，再点收起。",
     "showNodePayloadPreview": "节点 payload 预览",
-    "showNodePayloadPreviewDesc": "启用后，AI 图片、AI 视频和 AI 文本节点右上角显示请求内容预览按钮，便于检查提交给网关 / 服务商的 payload。",
+    "showNodePayloadPreviewDesc": "启用后，AI 图片、AI 视频、AI 音频和 AI 文本节点右上角显示请求内容预览按钮，便于检查提交给网关 / 服务商的 payload。",
     "enableAiTextStreaming": "AI 文本流式输出（实验）",
     "enableAiTextStreamingDesc": "仅作为实验开关；当前 Chat 传输仍会缓冲完整响应，因此生成会兜底为普通完整响应输出。",
     "useLegacyPanoramaControlDirection": "全景拖拽使用旧方向",

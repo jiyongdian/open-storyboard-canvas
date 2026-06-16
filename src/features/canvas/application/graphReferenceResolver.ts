@@ -1,6 +1,7 @@
 import {
   CANVAS_NODE_TYPES,
   isAiTextNode,
+  isAudioNode,
   isExportImageNode,
   isImageEditNode,
   isJsonCardNode,
@@ -12,7 +13,7 @@ import {
 } from '@/features/canvas/domain/canvasNodes';
 import { resolveNodeDisplayName } from '@/features/canvas/domain/nodeDisplay';
 
-export type GraphReferenceKind = 'image' | 'video' | 'text';
+export type GraphReferenceKind = 'image' | 'video' | 'audio' | 'text';
 
 export interface GraphReferenceItem {
   kind: GraphReferenceKind;
@@ -24,6 +25,7 @@ export interface GraphReferenceItem {
   previewImageUrl?: string | null;
   videoUrl?: string;
   thumbnailUrl?: string | null;
+  audioUrl?: string;
   title: string;
 }
 
@@ -101,6 +103,19 @@ function extractReferenceFromNode(
     };
   }
 
+  if (isAudioNode(node)) {
+    const audioUrl = node.data.localAudioUrl || node.data.audioUrl || '';
+    if (!audioUrl) {
+      return null;
+    }
+    return {
+      kind: 'audio',
+      sourceNodeId: node.id,
+      audioUrl,
+      title,
+    };
+  }
+
   if (
     node.type === CANVAS_NODE_TYPES.textAnnotation ||
     node.type === CANVAS_NODE_TYPES.jsonCard ||
@@ -125,6 +140,8 @@ function labelPrefixForKind(kind: GraphReferenceKind): string {
   switch (kind) {
     case 'video':
       return '视频';
+    case 'audio':
+      return '音频';
     case 'text':
       return '文本';
     case 'image':
@@ -142,6 +159,7 @@ export function collectInputReferences(
   const counts: Record<GraphReferenceKind, number> = {
     image: 0,
     video: 0,
+    audio: 0,
     text: 0,
   };
   const seen = new Set<string>();
@@ -196,6 +214,9 @@ export function buildReferenceContextPrompt(references: GraphReferenceItem[]): s
   const lines = contextual.map((reference) => {
     if (reference.kind === 'video') {
       return `- ${reference.token}：视频参考「${reference.title}」。请将它作为动作、节奏、镜头或场景连续性参考；支持视频引用的模型会收到对应视频 URL。`;
+    }
+    if (reference.kind === 'audio') {
+      return `- ${reference.token}：音频参考「${reference.title}」。请将它作为对白、旁白、音乐、音色或节奏参考；支持音频引用的模型会收到对应音频 URL。`;
     }
     const content = (reference.content ?? '').trim();
     const excerpt = content.length > 1200 ? `${content.slice(0, 1200)}...` : content;

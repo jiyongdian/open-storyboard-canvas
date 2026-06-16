@@ -1691,6 +1691,30 @@ fn normalize_video_extension(raw_ext: &str) -> String {
     }
 }
 
+fn normalize_audio_extension(raw_ext: &str) -> String {
+    let ext = raw_ext.trim().trim_start_matches('.').to_ascii_lowercase();
+    match ext.as_str() {
+        "mp3" | "wav" | "m4a" | "aac" | "ogg" | "opus" | "flac" | "webm" => ext,
+        "mpeg" => "mp3".to_string(),
+        "x-wav" | "wave" => "wav".to_string(),
+        _ => "wav".to_string(),
+    }
+}
+
+fn audio_mime_from_extension(extension: &str) -> &'static str {
+    match normalize_audio_extension(extension).as_str() {
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "aac" => "audio/aac",
+        "ogg" => "audio/ogg",
+        "opus" => "audio/opus",
+        "flac" => "audio/flac",
+        "webm" => "audio/webm",
+        _ => "audio/wav",
+    }
+}
+
 fn canonical_local_media_path(
     path: &Path,
     media_dir: &Path,
@@ -1834,6 +1858,14 @@ fn extension_from_mime(mime: &str) -> String {
         "video/x-msvideo" => "avi".to_string(),
         "video/x-matroska" => "mkv".to_string(),
         "video/mpeg" => "mpg".to_string(),
+        "audio/mpeg" | "audio/mp3" => "mp3".to_string(),
+        "audio/wav" | "audio/wave" | "audio/x-wav" => "wav".to_string(),
+        "audio/mp4" | "audio/x-m4a" => "m4a".to_string(),
+        "audio/aac" => "aac".to_string(),
+        "audio/ogg" => "ogg".to_string(),
+        "audio/opus" => "opus".to_string(),
+        "audio/flac" | "audio/x-flac" => "flac".to_string(),
+        "audio/webm" => "webm".to_string(),
         _ => "png".to_string(),
     }
 }
@@ -1853,6 +1885,27 @@ fn extension_from_video_mime(mime: &str) -> Option<String> {
         "video/x-msvideo" => Some("avi".to_string()),
         "video/x-matroska" => Some("mkv".to_string()),
         "video/mpeg" => Some("mpg".to_string()),
+        "application/octet-stream" => None,
+        _ => None,
+    }
+}
+
+fn extension_from_audio_mime(mime: &str) -> Option<String> {
+    let normalized = mime
+        .split(';')
+        .next()
+        .unwrap_or(mime)
+        .trim()
+        .to_ascii_lowercase();
+    match normalized.as_str() {
+        "audio/mpeg" | "audio/mp3" => Some("mp3".to_string()),
+        "audio/wav" | "audio/wave" | "audio/x-wav" => Some("wav".to_string()),
+        "audio/mp4" | "audio/x-m4a" => Some("m4a".to_string()),
+        "audio/aac" => Some("aac".to_string()),
+        "audio/ogg" => Some("ogg".to_string()),
+        "audio/opus" => Some("opus".to_string()),
+        "audio/flac" | "audio/x-flac" => Some("flac".to_string()),
+        "audio/webm" => Some("webm".to_string()),
         "application/octet-stream" => None,
         _ => None,
     }
@@ -2078,6 +2131,17 @@ fn describe_non_video_remote_body(content_type: &str, bytes: &[u8]) -> String {
     )
 }
 
+fn describe_non_audio_remote_body(content_type: &str, bytes: &[u8]) -> String {
+    let preview = bytes_text_preview(bytes, 360)
+        .unwrap_or_else(|| format!("{} bytes, binary preview unavailable", bytes.len()));
+    format!(
+        "Remote result did not return audio bytes (content-type={}, bytes={}). Body preview: {}",
+        content_type,
+        bytes.len(),
+        preview
+    )
+}
+
 async fn resolve_video_source_bytes_with_headers(
     source: &str,
     headers: Option<&HashMap<String, String>>,
@@ -2141,6 +2205,69 @@ async fn resolve_video_source_bytes_with_headers(
         .and_then(|value| value.to_str())
         .map(normalize_video_extension)
         .unwrap_or_else(|| "mp4".to_string());
+    Ok((bytes, ext))
+}
+
+async fn resolve_audio_source_bytes(source: &str) -> Result<(Vec<u8>, String), String> {
+    let trimmed = source.trim();
+    if trimmed.is_empty() {
+        return Err("Audio source is empty".to_string());
+    }
+
+    if trimmed.starts_with("data:") {
+        let (bytes, extension) = parse_data_url(trimmed)?;
+        return Ok((bytes, normalize_audio_extension(&extension)));
+    }
+
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        let download = download_remote_media_bytes(
+            trimmed,
+            None,
+            "audio/mpeg,audio/wav,audio/ogg,audio/webm,audio/*,*/*;q=0.8",
+            "audio",
+        )
+        .await?;
+        let content_type = download.content_type;
+        let mime_ext = extension_from_audio_mime(&content_type);
+        let bytes = download.bytes;
+
+        if content_type_is_textual_non_image(&content_type)
+            || bytes_text_preview(&bytes, 120)
+                .map(|preview| looks_like_json_text(&preview) || looks_like_html_text(&preview))
+                .unwrap_or(false)
+        {
+            return Err(describe_non_audio_remote_body(&content_type, &bytes));
+        }
+
+        let ext = mime_ext
+            .or_else(|| extension_from_path_like(trimmed))
+            .map(|value| normalize_audio_extension(&value))
+            .unwrap_or_else(|| "wav".to_string());
+
+        return Ok((bytes, ext));
+    }
+
+    if trimmed.starts_with("file://") {
+        let file_path = decode_file_url_path(trimmed);
+        let local_path = PathBuf::from(file_path);
+        let bytes = std::fs::read(&local_path)
+            .map_err(|e| format!("Failed to read file:// audio source: {}", e))?;
+        let ext = local_path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(normalize_audio_extension)
+            .unwrap_or_else(|| "wav".to_string());
+        return Ok((bytes, ext));
+    }
+
+    let local_path = PathBuf::from(trimmed);
+    let bytes = std::fs::read(&local_path)
+        .map_err(|e| format!("Failed to read local audio source: {}", e))?;
+    let ext = local_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(normalize_audio_extension)
+        .unwrap_or_else(|| "wav".to_string());
     Ok((bytes, ext))
 }
 
@@ -2921,6 +3048,48 @@ pub async fn save_video_source_to_directory(
         .map_err(|e| format!("Failed to save video to target directory: {}", e))?;
 
     Ok(output_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn save_audio_source_to_path(
+    source: String,
+    target_path: String,
+) -> Result<String, String> {
+    let trimmed_source = source.trim();
+    if trimmed_source.is_empty() {
+        return Err("Audio source is empty".to_string());
+    }
+
+    let trimmed_target = target_path.trim();
+    if trimmed_target.is_empty() {
+        return Err("Target path is empty".to_string());
+    }
+
+    let (bytes, extension) = resolve_audio_source_bytes(trimmed_source).await?;
+    let raw_path = PathBuf::from(normalize_user_selected_path(trimmed_target));
+    let output_path = ensure_output_path_with_extension(&raw_path, &extension);
+
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create output dir: {}", e))?;
+    }
+
+    std::fs::write(&output_path, bytes)
+        .map_err(|e| format!("Failed to save audio to target path: {}", e))?;
+
+    Ok(output_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn load_audio_source_data_url(source: String) -> Result<String, String> {
+    let trimmed_source = source.trim();
+    if trimmed_source.is_empty() {
+        return Err("Audio source is empty".to_string());
+    }
+
+    let (bytes, extension) = resolve_audio_source_bytes(trimmed_source).await?;
+    let mime = audio_mime_from_extension(&extension);
+    Ok(format!("data:{};base64,{}", mime, STANDARD.encode(bytes)))
 }
 
 #[tauri::command]

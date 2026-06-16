@@ -161,6 +161,8 @@ const EMPTY_CANVAS_ASSETS: CanvasAssetItem[] = [];
 const BLANK_CANVAS_CONTEXT_MENU_DOUBLE_CLICK_MS = 450;
 const BLANK_CANVAS_CONTEXT_MENU_DOUBLE_CLICK_DISTANCE = 8;
 const CANVAS_MOUSE_BUTTONS = [0, 1, 2] as const;
+const SUPPRESS_PANE_CLICK_AFTER_MARQUEE_MS = 120;
+const SUPPRESS_PANE_CLICK_AFTER_CONNECT_MS = 200;
 type CanvasMouseButton = typeof CANVAS_MOUSE_BUTTONS[number];
 
 const CLICK_SLOT_BY_BUTTON: Record<CanvasMouseButton, CanvasMouseBindingSlot> = {
@@ -715,6 +717,7 @@ function canNodeTypeBeManualConnectionSource(type: CanvasNodeType): boolean {
     || type === CANVAS_NODE_TYPES.imageEdit
     || type === CANVAS_NODE_TYPES.exportImage
     || type === CANVAS_NODE_TYPES.video
+    || type === CANVAS_NODE_TYPES.audio
     || type === CANVAS_NODE_TYPES.aiText
     || type === CANVAS_NODE_TYPES.textAnnotation
     || type === CANVAS_NODE_TYPES.jsonCard;
@@ -951,8 +954,9 @@ export function Canvas() {
   const reactFlowInstance = useReactFlow();
   const wrapperRef = useRef<HTMLDivElement>(null);
   const lastCanvasPointerRef = useRef<{ x: number; y: number } | null>(null);
-  const suppressNextPaneClickRef = useRef(false);
+  const suppressPaneClickUntilRef = useRef(0);
   const suppressNextEdgeClickRef = useRef(false);
+  const suppressNextMarqueeSelectionClearRef = useRef(false);
   const nodesRef = useRef<CanvasNode[]>([]);
   const marqueeGestureRef = useRef<CanvasMarqueeGesture | null>(null);
   const blankCanvasRightClickRef = useRef<BlankCanvasRightClickState | null>(null);
@@ -1129,6 +1133,15 @@ export function Canvas() {
   const handleNodesChange = useCallback(
     (changes: NodeChange<CanvasNode>[]) => {
       if (pendingConnectStart && changes.every((change) => change.type === 'select')) {
+        return;
+      }
+
+      if (
+        suppressNextMarqueeSelectionClearRef.current &&
+        changes.length > 0 &&
+        changes.every((change) => change.type === 'select' && change.selected === false)
+      ) {
+        suppressNextMarqueeSelectionClearRef.current = false;
         return;
       }
 
@@ -1679,7 +1692,7 @@ export function Canvas() {
     setPreviewConnectionVisual(null);
   }, [reactFlowInstance, selectSingleNode]);
 
-  const selectNodesInMarquee = useCallback((gesture: CanvasMarqueeGesture) => {
+  const selectNodesInMarquee = useCallback((gesture: CanvasMarqueeGesture): string[] => {
     const selectionClientRect = {
       left: Math.min(gesture.startClientX, gesture.currentClientX),
       top: Math.min(gesture.startClientY, gesture.currentClientY),
@@ -1712,6 +1725,7 @@ export function Canvas() {
     }));
     applyNodesChange(selectionChanges);
     setSelectedNode(nextSelectedIds.length === 1 ? nextSelectedIds[0] : null);
+    return nextSelectedIds;
   }, [applyNodesChange, setSelectedNode]);
 
   useEffect(() => {
@@ -1721,6 +1735,14 @@ export function Canvas() {
     }
 
     const clearMarqueeGesture = () => {
+      const gesture = marqueeGestureRef.current;
+      if (gesture) {
+        try {
+          wrapperElement.releasePointerCapture(gesture.pointerId);
+        } catch {
+          // Pointer capture can already be released by the browser.
+        }
+      }
       marqueeGestureRef.current = null;
       setMarqueeRect(null);
     };
@@ -1739,8 +1761,15 @@ export function Canvas() {
         return;
       }
 
-      event.preventDefault();
-      event.stopPropagation();
+      if (event.button !== 0) {
+        event.preventDefault();
+        event.stopPropagation();
+        try {
+          wrapperElement.setPointerCapture(event.pointerId);
+        } catch {
+          // Some WebViews may reject capture if the pointer has already been claimed.
+        }
+      }
       marqueeGestureRef.current = {
         pointerId: event.pointerId,
         button: event.button,
@@ -1764,8 +1793,6 @@ export function Canvas() {
         return;
       }
 
-      event.preventDefault();
-      event.stopPropagation();
       gesture.currentClientX = event.clientX;
       gesture.currentClientY = event.clientY;
 
@@ -1773,11 +1800,21 @@ export function Canvas() {
         gesture.currentClientX - gesture.startClientX,
         gesture.currentClientY - gesture.startClientY
       );
-      if (!gesture.moved && dragDistance < CANVAS_MARQUEE_MIN_DISTANCE) {
-        return;
+      if (!gesture.moved) {
+        if (dragDistance < CANVAS_MARQUEE_MIN_DISTANCE) {
+          return;
+        }
+
+        gesture.moved = true;
+        try {
+          wrapperElement.setPointerCapture(gesture.pointerId);
+        } catch {
+          // Pointer capture is best-effort; window listeners still receive the gesture.
+        }
       }
 
-      gesture.moved = true;
+      event.preventDefault();
+      event.stopPropagation();
       const containerRect = wrapperElement.getBoundingClientRect();
       setMarqueeRect(normalizeClientRect(
         gesture.startClientX,
@@ -1788,44 +1825,71 @@ export function Canvas() {
       ));
     };
 
-    const handlePointerUp = (event: PointerEvent) => {
+    const completeMarqueeGesture = (
+      event: PointerEvent | MouseEvent,
+      options: { allowSelectionOnCancel?: boolean } = {}
+    ) => {
       const gesture = marqueeGestureRef.current;
-      if (!gesture || event.pointerId !== gesture.pointerId) {
+      if (!gesture || ('pointerId' in event && event.pointerId !== gesture.pointerId)) {
+        return;
+      }
+
+      gesture.currentClientX = event.clientX;
+      gesture.currentClientY = event.clientY;
+      const shouldSelectMarquee = gesture.moved && options.allowSelectionOnCancel !== false;
+      const shouldOpenNodeMenu =
+        !shouldSelectMarquee &&
+        Boolean(gesture.startNodeId) &&
+        getCanvasMouseAction(canvasMouseBindings, gesture.button, 'click') === 'nodeMenu';
+
+      if (!shouldSelectMarquee && !shouldOpenNodeMenu) {
+        clearMarqueeGesture();
         return;
       }
 
       event.preventDefault();
       event.stopPropagation();
-      if (gesture.moved) {
-        selectNodesInMarquee(gesture);
-      } else if (
-        gesture.startNodeId &&
-        getCanvasMouseAction(canvasMouseBindings, gesture.button, 'click') === 'nodeMenu'
-      ) {
+      if (shouldSelectMarquee) {
+        const nextSelectedIds = selectNodesInMarquee(gesture);
+        if (gesture.button === 0) {
+          suppressPaneClickUntilRef.current =
+            Date.now() + SUPPRESS_PANE_CLICK_AFTER_MARQUEE_MS;
+          if (nextSelectedIds.length > 0) {
+            suppressNextMarqueeSelectionClearRef.current = true;
+            window.setTimeout(() => {
+              suppressNextMarqueeSelectionClearRef.current = false;
+            }, 120);
+          }
+        }
+      } else if (gesture.startNodeId) {
         openNodeContextMenuAtClientPosition(gesture.startNodeId, event.clientX, event.clientY);
       }
       clearMarqueeGesture();
     };
 
+    const handlePointerUp = (event: PointerEvent) => {
+      completeMarqueeGesture(event);
+    };
+
+    const handleMouseUp = (event: MouseEvent) => {
+      completeMarqueeGesture(event);
+    };
+
     const handlePointerCancel = (event: PointerEvent) => {
-      const gesture = marqueeGestureRef.current;
-      if (!gesture || event.pointerId !== gesture.pointerId) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      clearMarqueeGesture();
+      completeMarqueeGesture(event);
     };
 
     wrapperElement.addEventListener('pointerdown', handlePointerDown, true);
     window.addEventListener('pointermove', handlePointerMove, true);
     window.addEventListener('pointerup', handlePointerUp, true);
+    window.addEventListener('mouseup', handleMouseUp, true);
     window.addEventListener('pointercancel', handlePointerCancel, true);
 
     return () => {
       wrapperElement.removeEventListener('pointerdown', handlePointerDown, true);
       window.removeEventListener('pointermove', handlePointerMove, true);
       window.removeEventListener('pointerup', handlePointerUp, true);
+      window.removeEventListener('mouseup', handleMouseUp, true);
       window.removeEventListener('pointercancel', handlePointerCancel, true);
     };
   }, [canvasMouseBindings, openNodeContextMenuAtClientPosition, selectNodesInMarquee]);
@@ -2133,9 +2197,12 @@ export function Canvas() {
   }, [reactFlowInstance]);
 
   const handlePaneClick = useCallback((event: ReactMouseEvent) => {
-    if (suppressNextPaneClickRef.current) {
-      suppressNextPaneClickRef.current = false;
-      return;
+    if (suppressPaneClickUntilRef.current > 0) {
+      const shouldSuppress = Date.now() <= suppressPaneClickUntilRef.current;
+      suppressPaneClickUntilRef.current = 0;
+      if (shouldSuppress) {
+        return;
+      }
     }
 
     if (event.detail >= 2) {
@@ -2143,14 +2210,14 @@ export function Canvas() {
       return;
     }
 
-    setSelectedNode(null);
+    selectSingleNode(null);
     setIsAssetPanelOpen(false);
     setShowNodeMenu(false);
     setNodeContextMenu(null);
     setMenuAllowedTypes(undefined);
     setPendingConnectStart(null);
     setPreviewConnectionVisual(null);
-  }, [openNodeMenuAtClientPosition, setSelectedNode]);
+  }, [openNodeMenuAtClientPosition, selectSingleNode]);
 
   const handleNodeSelect = useCallback(
     (type: CanvasNodeType) => {
@@ -3370,7 +3437,8 @@ export function Canvas() {
         y: clientPosition.y - containerRect.top,
       });
       setMenuAllowedTypes(allowedTypes);
-      suppressNextPaneClickRef.current = true;
+      suppressPaneClickUntilRef.current =
+        Date.now() + SUPPRESS_PANE_CLICK_AFTER_CONNECT_MS;
       setShowNodeMenu(true);
     },
     [connectNodes, nodes, pendingConnectStart, reactFlowInstance, scheduleCanvasPersist, updateNodeData]

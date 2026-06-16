@@ -147,7 +147,7 @@ export function parseInputReferenceSignature(signature: string): GraphReferenceI
           return null;
         }
         const record = item as Partial<GraphReferenceItem>;
-        if (record.kind !== 'image' && record.kind !== 'video' && record.kind !== 'text') {
+        if (record.kind !== 'image' && record.kind !== 'video' && record.kind !== 'audio' && record.kind !== 'text') {
           return null;
         }
         if (typeof record.sourceNodeId !== 'string' || typeof record.label !== 'string' || typeof record.token !== 'string') {
@@ -157,6 +157,9 @@ export function parseInputReferenceSignature(signature: string): GraphReferenceI
           return null;
         }
         if (record.kind === 'video' && typeof record.videoUrl !== 'string') {
+          return null;
+        }
+        if (record.kind === 'audio' && typeof record.audioUrl !== 'string') {
           return null;
         }
         if (record.kind === 'text' && typeof record.content !== 'string') {
@@ -173,6 +176,7 @@ export function parseInputReferenceSignature(signature: string): GraphReferenceI
           previewImageUrl: typeof record.previewImageUrl === 'string' ? record.previewImageUrl : null,
           videoUrl: typeof record.videoUrl === 'string' ? record.videoUrl : undefined,
           thumbnailUrl: typeof record.thumbnailUrl === 'string' ? record.thumbnailUrl : null,
+          audioUrl: typeof record.audioUrl === 'string' ? record.audioUrl : undefined,
         };
       })
       .filter((item): item is GraphReferenceItem => Boolean(item));

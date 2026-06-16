@@ -8,6 +8,7 @@ import { useTranslation } from 'react-i18next';
 import {
   isExportImageNode,
   isAiVideoNode,
+  isAudioNode,
   isImageEditNode,
   isUploadNode,
   isVideoNode,
@@ -23,6 +24,7 @@ import {
 } from '@/features/canvas/application/generatedMediaNaming';
 import {
   copyImageSourceToClipboard,
+  saveAudioSourceToPath,
   saveImageSourceToDownloads,
   saveImageSourceToDirectory,
   saveImageSourceToPath,
@@ -73,6 +75,30 @@ function resolvePromptPresetMenuPosition(button: HTMLButtonElement): { x: number
   };
 }
 
+function sanitizeAudioFileStem(raw: string): string {
+  const compact = raw.trim().replace(/[<>:"/\\|?*\u0000-\u001f]+/g, '').replace(/\s+/g, '-');
+  return compact.replace(/^\.+|\.+$/g, '') || 'audio';
+}
+
+function inferAudioExtension(source: string, fallback = 'wav'): string {
+  const mimeMatch = /^data:audio\/([^;,]+)/i.exec(source.trim());
+  if (mimeMatch) {
+    const subtype = mimeMatch[1].toLowerCase();
+    if (subtype.includes('mpeg')) return 'mp3';
+    if (subtype.includes('x-wav') || subtype.includes('wave')) return 'wav';
+    return subtype.replace(/[^a-z0-9]+/g, '') || fallback;
+  }
+  try {
+    const parsed = new URL(source);
+    const fileName = parsed.pathname.split('/').pop() ?? '';
+    const ext = /\.([a-z0-9]{2,5})$/i.exec(fileName)?.[1];
+    return ext?.toLowerCase() || fallback;
+  } catch {
+    const ext = /\.([a-z0-9]{2,5})(?:[?#].*)?$/i.exec(source)?.[1];
+    return ext?.toLowerCase() || fallback;
+  }
+}
+
 export const NodeActionToolbar = memo(({ node, offset = NODE_TOOLBAR_OFFSET }: NodeActionToolbarProps) => {
   const { t } = useTranslation();
   const deleteNode = useCanvasStore((state) => state.deleteNode);
@@ -86,9 +112,10 @@ export const NodeActionToolbar = memo(({ node, offset = NODE_TOOLBAR_OFFSET }: N
    *       module chips + delete; click a chip to select/deselect it, and the chip's
    *       prompt template is composed at submit time.
    *  - C: image-bearing AI node (imageEdit with image OR exportImage) — same as A. */
-  const caseKind: 'A' | 'B' | 'C' | 'V' | 'AI_VIDEO_INPUT' = useMemo(() => {
+  const caseKind: 'A' | 'B' | 'C' | 'V' | 'AUDIO' | 'AI_VIDEO_INPUT' = useMemo(() => {
     if (isAiVideoNode(node)) return 'AI_VIDEO_INPUT';
     if (isVideoNode(node)) return 'V';
+    if (isAudioNode(node)) return 'AUDIO';
     if (isUploadNode(node)) return 'A';
     if (isImageEditNode(node)) {
       return node.data.imageUrl ? 'C' : 'B';
@@ -188,6 +215,12 @@ export const NodeActionToolbar = memo(({ node, offset = NODE_TOOLBAR_OFFSET }: N
     }
     return null;
   }, [node]);
+  const rawAudioSource = useMemo(() => {
+    if (isAudioNode(node)) {
+      return node.data.localAudioUrl || node.data.audioUrl || null;
+    }
+    return null;
+  }, [node]);
   const imageSource = useMemo(
     () => (rawImageSource ? resolveImageDisplayUrl(rawImageSource) : null),
     [rawImageSource]
@@ -195,6 +228,10 @@ export const NodeActionToolbar = memo(({ node, offset = NODE_TOOLBAR_OFFSET }: N
   const videoSource = useMemo(
     () => (rawVideoSource ? resolveImageDisplayUrl(rawVideoSource) : null),
     [rawVideoSource]
+  );
+  const audioSource = useMemo(
+    () => (rawAudioSource ? resolveImageDisplayUrl(rawAudioSource) : null),
+    [rawAudioSource]
   );
   const referenceImageSource = useMemo(() => {
     if (isUploadNode(node) || isImageEditNode(node) || isExportImageNode(node)) {
@@ -204,6 +241,7 @@ export const NodeActionToolbar = memo(({ node, offset = NODE_TOOLBAR_OFFSET }: N
   }, [node]);
   const canHandleImage = Boolean(imageSource);
   const canHandleVideo = Boolean(rawVideoSource && videoSource);
+  const canHandleAudio = Boolean(rawAudioSource && audioSource);
   const canRetryGeneration = canRetryGenerationFetch(node);
   const suggestedImageSavePath = useMemo(() => {
     if (isExportImageNode(node)) {
@@ -229,6 +267,21 @@ export const NodeActionToolbar = memo(({ node, offset = NODE_TOOLBAR_OFFSET }: N
     }
     return `node-${node.id}`;
   }, [node]);
+  const suggestedAudioStem = useMemo(() => {
+    if (isAudioNode(node)) {
+      return sanitizeAudioFileStem(
+        node.data.generatedFileName
+        || node.data.sourceFileName
+        || node.data.displayName
+        || `audio-${node.id}`
+      );
+    }
+    return `audio-${node.id}`;
+  }, [node]);
+  const suggestedAudioSavePath = useMemo(() => {
+    const extension = rawAudioSource ? inferAudioExtension(rawAudioSource) : 'wav';
+    return `${suggestedAudioStem}.${extension}`;
+  }, [rawAudioSource, suggestedAudioStem]);
 
   const closePromptPresetMenu = useCallback(() => {
     setPromptPresetMenu(null);
@@ -495,6 +548,36 @@ export const NodeActionToolbar = memo(({ node, offset = NODE_TOOLBAR_OFFSET }: N
     [closeDownloadMenu, rawVideoSource, showFeedbackToast, suggestedVideoStem, t]
   );
 
+  const handleDownloadAudio = useCallback(async (event?: MouseEvent<HTMLButtonElement>) => {
+    event?.stopPropagation();
+    if (!rawAudioSource) return;
+    try {
+      const selectedPath = await save({ defaultPath: suggestedAudioSavePath });
+      if (!selectedPath || Array.isArray(selectedPath)) return;
+      await saveAudioSourceToPath(rawAudioSource, selectedPath);
+      showFeedbackToast(t('nodeToolbar.downloadSuccess'));
+    } catch (error) {
+      console.error('Failed to save audio', error);
+      showFeedbackToast(t('nodeToolbar.downloadFailed'), 'error');
+    }
+  }, [rawAudioSource, showFeedbackToast, suggestedAudioSavePath, t]);
+
+  const openAudioTrimMode = useCallback((event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    if (!isAudioNode(node)) {
+      return;
+    }
+    const duration = typeof node.data.durationSeconds === 'number' && node.data.durationSeconds > 0
+      ? node.data.durationSeconds
+      : 1;
+    updateNodeData(node.id, {
+      isAudioTrimMode: true,
+      audioTrimStartSeconds: 0,
+      audioTrimEndSeconds: Math.min(duration, Math.max(0.1, duration * 0.5)),
+    });
+    showFeedbackToast('在音频条上拖动裁剪框');
+  }, [node, showFeedbackToast, updateNodeData]);
+
   const handleOpenPromptPresetMenu = useCallback((event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
     const button = event.currentTarget;
@@ -712,7 +795,7 @@ export const NodeActionToolbar = memo(({ node, offset = NODE_TOOLBAR_OFFSET }: N
         {caseKind === 'B' && renderPromptPresetButton()}
 
         {/* Case A / C: full tool chips. */}
-        {caseKind !== 'B' && caseKind !== 'V' && caseKind !== 'AI_VIDEO_INPUT' && (<>
+        {caseKind !== 'B' && caseKind !== 'V' && caseKind !== 'AUDIO' && caseKind !== 'AI_VIDEO_INPUT' && (<>
         {/* 多角度 - Multi-angle */}
         <UiChipButton
           ref={multiAngleButtonRef}
@@ -913,6 +996,24 @@ export const NodeActionToolbar = memo(({ node, offset = NODE_TOOLBAR_OFFSET }: N
         >
           <Download className="h-3.5 w-3.5" />
           {t('nodeToolbar.download')}
+        </UiChipButton>
+        </>)}
+
+        {caseKind === 'AUDIO' && canHandleAudio && (<>
+        <UiChipButton
+          className={`h-8 ${TOOLBAR_BUTTON_RADIUS_CLASS} px-2.5 text-xs ${TOOLBAR_NEUTRAL_BUTTON_CLASS}`}
+          onClick={(event) => { void handleDownloadAudio(event); }}
+        >
+          <Download className="h-3.5 w-3.5" />
+          {t('nodeToolbar.download')}
+        </UiChipButton>
+
+        <UiChipButton
+          className={`h-8 ${TOOLBAR_BUTTON_RADIUS_CLASS} px-2.5 text-xs ${TOOLBAR_NEUTRAL_BUTTON_CLASS}`}
+          onClick={openAudioTrimMode}
+        >
+          <Scissors className="h-3.5 w-3.5" />
+          {t('nodeToolbar.audioTrim')}
         </UiChipButton>
         </>)}
 

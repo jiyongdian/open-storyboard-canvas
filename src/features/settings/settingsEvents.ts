@@ -7,6 +7,8 @@ export type SettingsCategory =
   | 'customProviders'
   | 'dreamina'
   | 'agnes'
+  | 'imageHosting'
+  | 'audioModels'
   | 'promptManagement'
   | 'promptPresets'
   | 'textAgents'

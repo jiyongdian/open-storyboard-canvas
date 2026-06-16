@@ -30,6 +30,7 @@ Henji-AI/
 .agents/
 .claude/
 .codex/
+.codex-run/
 .learnings/
 .omc/
 .trellis/

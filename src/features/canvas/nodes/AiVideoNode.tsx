@@ -50,6 +50,11 @@ import {
   type VideoModelConfigValue,
 } from '@/features/canvas/application/videoModelCatalog';
 import {
+  DEFAULT_VIDEO_INPUT_SCHEMA,
+  normalizeVideoInputSchema,
+  type VideoInputSchema,
+} from '@/features/canvas/application/videoInputSchema';
+import {
   buildVideoGenerationDebugPreview,
   canvasEventBus,
   canvasVideoGateway,
@@ -90,7 +95,7 @@ const VIDEO_GENERATION_PROGRESS_DURATION_MS = 15 * 60 * 1000;
 
 function findReferenceTokens(prompt: string, maxImageCount: number): Array<{ token: string; start: number }> {
   const matches: Array<{ token: string; start: number }> = [];
-  const regex = /@?(?:图|视频|文本)(\d+)/g;
+  const regex = /@?(?:图|视频|音频|文本)(\d+)/g;
   let match: RegExpExecArray | null;
   while ((match = regex.exec(prompt)) !== null) {
     const imageIndex = Number(match[1]);
@@ -165,11 +170,34 @@ function resolveAgnesVideoMode(extraParams: Record<string, unknown> | undefined)
   return typeof raw === 'string' && raw.toLowerCase() === 'keyframes' ? 'keyframes' : null;
 }
 
+function resolveEntryInputSchema(entry?: VideoCatalogEntry): VideoInputSchema {
+  return normalizeVideoInputSchema(entry?.inputSchema, DEFAULT_VIDEO_INPUT_SCHEMA);
+}
+
+function describeVideoInputSchema(schema: VideoInputSchema): string {
+  const parts: string[] = [];
+  if (schema.images.enabled) {
+    const imagePart = schema.images.max > 0
+      ? `图 ${schema.images.min}-${schema.images.max}`
+      : '图 0';
+    parts.push(schema.images.requireImageHost ? `${imagePart} URL` : imagePart);
+  }
+  if (schema.video.enabled) {
+    parts.push(`视频 ${schema.video.min}-${schema.video.max}`);
+  }
+  if (schema.audio.enabled) {
+    parts.push(`音频 ${schema.audio.min}-${schema.audio.max}`);
+  }
+  return parts.length > 0 ? parts.join(' / ') : '无引用';
+}
+
 interface VideoGenerationRequestAssembly {
   prompt: string;
   latestModelConfig: VideoModelConfigValue;
   latestEntry: VideoCatalogEntry;
   latestIncomingImages: string[];
+  latestIncomingVideos: string[];
+  latestIncomingAudios: string[];
   outputAspectRatio: string;
   gatewayPayload: {
     prompt: string;
@@ -178,6 +206,8 @@ interface VideoGenerationRequestAssembly {
     aspectRatio?: string;
     seconds?: number;
     referenceImages: string[];
+    referenceVideos: string[];
+    referenceAudios: string[];
     extraParams?: Record<string, unknown>;
   };
 }
@@ -229,7 +259,6 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
     })),
     [incomingReferences]
   );
-
   const setSelectedNode = useCanvasStore((state) => state.setSelectedNode);
   const updateNodeData = useCanvasStore((state) => state.updateNodeData);
   const addNode = useCanvasStore((state) => state.addNode);
@@ -244,6 +273,27 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
   const selectedEntry = useMemo(
     () => resolveConfigEntry(catalog, resolvedModelConfig),
     [catalog, resolvedModelConfig]
+  );
+  const currentInputSchema = useMemo(
+    () => resolveEntryInputSchema(selectedEntry),
+    [selectedEntry]
+  );
+  const schemaIncomingImageItems = useMemo(
+    () => currentInputSchema.images.enabled
+      ? incomingReferenceItems
+        .filter((reference) => reference.kind === 'image' && reference.imageUrl)
+        .slice(0, currentInputSchema.images.max)
+      : [],
+    [currentInputSchema.images.enabled, currentInputSchema.images.max, incomingReferenceItems]
+  );
+  const schemaReferencePickerItems = useMemo(
+    () => incomingReferenceItems.filter((reference) => {
+      if (reference.kind === 'image') return currentInputSchema.images.enabled;
+      if (reference.kind === 'video') return currentInputSchema.video.enabled;
+      if (reference.kind === 'audio') return currentInputSchema.audio.enabled;
+      return true;
+    }),
+    [currentInputSchema.audio.enabled, currentInputSchema.images.enabled, currentInputSchema.video.enabled, incomingReferenceItems]
   );
   const isAgnesVideoModel = selectedEntry?.providerId === 'agnes';
   const agnesVideoMode = resolveAgnesVideoMode(resolvedModelConfig?.extraParams);
@@ -340,7 +390,7 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
   }, []);
 
   const insertReferenceToken = useCallback((index: number) => {
-    const marker = incomingReferenceItems[index]?.token ?? '';
+    const marker = schemaReferencePickerItems[index]?.token ?? '';
     if (!marker) {
       return;
     }
@@ -359,7 +409,7 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
       promptRef.current?.setSelectionRange(nextCursor, nextCursor);
       syncPromptHighlightScroll();
     });
-  }, [flushPromptDraft, incomingReferenceItems, syncPromptHighlightScroll]);
+  }, [flushPromptDraft, schemaReferencePickerItems, syncPromptHighlightScroll]);
 
   const handleConfigChange = useCallback((patch: Partial<VideoModelConfigValue>) => {
     const base = resolvedModelConfig ?? resolveVideoModelConfig(catalog, null);
@@ -420,19 +470,12 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
     );
     const latestModelConfig = resolveVideoModelConfig(latestCatalog, latestData.modelConfig ?? resolvedModelConfig);
     const latestEntry = resolveConfigEntry(latestCatalog, latestModelConfig);
-    const basePrompt = latestPromptDraft.replace(/@(?=(?:图|视频|文本)\d+)/g, '').trim();
+    const basePrompt = latestPromptDraft.replace(/@(?=(?:图|视频|音频|文本)\d+)/g, '').trim();
     const latestReferences = collectInputReferences(id, latestCanvasState.nodes, latestCanvasState.edges);
     const referenceContextPrompt = buildReferenceContextPrompt(latestReferences);
     const prompt = referenceContextPrompt
       ? `${referenceContextPrompt}\n\n${basePrompt}`
       : basePrompt;
-    const latestIncomingImages = latestReferences
-      .filter((reference) => reference.kind === 'image' && reference.imageUrl)
-      .map((reference) => reference.imageUrl as string);
-    const latestIncomingVideos = latestReferences
-      .filter((reference) => reference.kind === 'video' && reference.videoUrl)
-      .map((reference) => reference.videoUrl as string);
-
     if (!prompt) {
       const message = t('node.aiVideo.promptRequired');
       setError(message);
@@ -451,20 +494,57 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
       void showErrorDialog(message, t('common.error'));
       return null;
     }
+    const latestInputSchema = resolveEntryInputSchema(latestEntry);
+    const latestIncomingImages = latestInputSchema.images.enabled
+      ? latestReferences
+        .filter((reference) => reference.kind === 'image' && reference.imageUrl)
+        .map((reference) => reference.imageUrl as string)
+        .slice(0, latestInputSchema.images.max)
+      : [];
+    const latestIncomingVideos = latestInputSchema.video.enabled
+      ? latestReferences
+        .filter((reference) => reference.kind === 'video' && reference.videoUrl)
+        .map((reference) => reference.videoUrl as string)
+        .slice(0, latestInputSchema.video.max)
+      : [];
+    const latestIncomingAudios = latestInputSchema.audio.enabled
+      ? latestReferences
+        .filter((reference) => reference.kind === 'audio' && reference.audioUrl)
+        .map((reference) => reference.audioUrl as string)
+        .slice(0, latestInputSchema.audio.max)
+      : [];
+    if (latestIncomingImages.length < latestInputSchema.images.min) {
+      const message = `当前模型至少需要 ${latestInputSchema.images.min} 张图片引用。`;
+      setError(message);
+      void showErrorDialog(message, t('common.error'));
+      return null;
+    }
+    if (latestIncomingVideos.length < latestInputSchema.video.min) {
+      const message = `当前模型至少需要 ${latestInputSchema.video.min} 个视频引用。`;
+      setError(message);
+      void showErrorDialog(message, t('common.error'));
+      return null;
+    }
+    if (latestIncomingAudios.length < latestInputSchema.audio.min) {
+      const message = `当前模型至少需要 ${latestInputSchema.audio.min} 个音频引用。`;
+      setError(message);
+      void showErrorDialog(message, t('common.error'));
+      return null;
+    }
     const outputAspectRatio =
       aspectRatioFromPixelResolution(latestModelConfig.resolution)
       ?? latestModelConfig.aspectRatio
       ?? '16:9';
     const extraParams = { ...(latestModelConfig.extraParams ?? {}) };
-    if (latestEntry.providerId === 'agnes' && latestIncomingVideos[0]) {
-      extraParams.video_url = extraParams.video_url ?? extraParams.videoUrl ?? latestIncomingVideos[0];
-    }
+    extraParams.videoInputSchema = latestInputSchema;
 
     return {
       prompt,
       latestModelConfig,
       latestEntry,
       latestIncomingImages,
+      latestIncomingVideos,
+      latestIncomingAudios,
       outputAspectRatio,
       gatewayPayload: {
         prompt,
@@ -473,6 +553,8 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
         aspectRatio: latestModelConfig.aspectRatio,
         seconds: Number(latestModelConfig.duration) || undefined,
         referenceImages: latestIncomingImages,
+        referenceVideos: latestIncomingVideos,
+        referenceAudios: latestIncomingAudios,
         extraParams,
       },
     };
@@ -498,6 +580,8 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
         latestModelConfig,
         latestEntry,
         latestIncomingImages,
+        latestIncomingVideos,
+        latestIncomingAudios,
         outputAspectRatio,
         gatewayPayload,
       } = assembled;
@@ -545,6 +629,8 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
           duration: latestModelConfig.duration,
           resolution: latestModelConfig.resolution,
           aspectRatio: latestModelConfig.aspectRatio,
+          referenceVideoCount: latestIncomingVideos.length,
+          referenceAudioCount: latestIncomingAudios.length,
           ...(latestModelConfig.extraParams ?? {}),
         },
         referenceImageCount: latestIncomingImages.length,
@@ -646,7 +732,7 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
   }, [handleGenerate, id]);
 
   const handlePromptKeyDown = useCallback((event: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (event.key === '@' && incomingReferenceItems.length > 0) {
+    if (event.key === '@' && schemaReferencePickerItems.length > 0) {
       event.preventDefault();
       setReferencePickerOpen(true);
       setProviderOpen(false);
@@ -663,7 +749,7 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
       event.preventDefault();
       void handleGenerate();
     }
-  }, [handleGenerate, incomingReferenceItems.length, referencePickerOpen]);
+  }, [handleGenerate, schemaReferencePickerItems.length, referencePickerOpen]);
 
   const handlePickProvider = useCallback((providerLabel: string) => {
     const entry = entriesByProvider.get(providerLabel)?.find((candidate) => candidate.usable);
@@ -674,11 +760,11 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
         duration: defaultDurationForVideoEntry(entry),
         resolution: entry.supportedResolutions[0] ?? '1280x720',
         aspectRatio: entry.supportedAspectRatios[0] ?? '16:9',
-        extraParams: resolvedModelConfig?.extraParams ?? {},
+        extraParams: {},
       },
     });
     setProviderOpen(false);
-  }, [entriesByProvider, id, resolvedModelConfig?.extraParams, updateNodeData]);
+  }, [entriesByProvider, id, updateNodeData]);
 
   const handlePickModel = useCallback((entry: VideoCatalogEntry) => {
     if (!entry.usable) return;
@@ -694,7 +780,7 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
         aspectRatio: resolvedModelConfig?.aspectRatio && entry.supportedAspectRatios.includes(resolvedModelConfig.aspectRatio)
           ? resolvedModelConfig.aspectRatio
           : entry.supportedAspectRatios[0] ?? '16:9',
-        extraParams: resolvedModelConfig?.extraParams ?? {},
+        extraParams: {},
       },
     });
     setModelOpen(false);
@@ -770,13 +856,13 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
           />
         </div>
 
-        {referencePickerOpen && incomingReferenceItems.length > 0 && (
+        {referencePickerOpen && schemaReferencePickerItems.length > 0 && (
           <div
             className="nowheel absolute left-3 top-3 z-30 w-[140px] overflow-hidden rounded-xl border border-[var(--canvas-node-field-border)] bg-[var(--canvas-node-menu-bg)] shadow-xl"
             onMouseDown={(event) => event.stopPropagation()}
           >
             <div className="ui-scrollbar nowheel max-h-[220px] overflow-y-auto">
-              {incomingReferenceItems.map((item, index) => (
+              {schemaReferencePickerItems.map((item, index) => (
                 <button
                   key={`${item.kind}-${item.sourceNodeId}-${index}`}
                   type="button"
@@ -797,7 +883,7 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
                     />
                   ) : (
                     <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded bg-[var(--canvas-node-button-bg)] text-[10px] font-semibold text-text-muted">
-                      {item.kind === 'video' ? 'V' : 'T'}
+                      {item.kind === 'video' ? 'V' : item.kind === 'audio' ? 'A' : 'T'}
                     </span>
                   )}
                   <span>{item.label}</span>
@@ -990,7 +1076,7 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
                     </div>
                   )}
                 </div>
-                {isAgnesVideoModel && incomingImages.length > 1 && (
+                {isAgnesVideoModel && schemaIncomingImageItems.length > 1 && (
                   <div>
                     <div className="mb-1 text-[10px] text-text-muted">{t('node.aiVideo.agnesMode')}</div>
                     <div className="grid grid-cols-2 gap-1">
@@ -1066,7 +1152,17 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
           </div>
         )}
 
-        {incomingReferenceItems.length > 0 && (
+        {selectedEntry && (
+          <UiButton
+            variant="muted"
+            className={`shrink-0 ${NODE_CONTROL_CHIP_CLASS}`}
+            title={describeVideoInputSchema(currentInputSchema)}
+          >
+            <span>{describeVideoInputSchema(currentInputSchema)}</span>
+          </UiButton>
+        )}
+
+        {schemaReferencePickerItems.length > 0 && (
           <UiButton
             onClick={(event) => {
               event.stopPropagation();
@@ -1078,7 +1174,7 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
             variant="muted"
             className={`shrink-0 ${NODE_CONTROL_CHIP_CLASS}`}
           >
-            <span>{t('node.aiVideo.referenceCount', { count: incomingReferenceItems.length })}</span>
+            <span>{t('node.aiVideo.referenceCount', { count: schemaReferencePickerItems.length })}</span>
           </UiButton>
         )}
         <UiButton

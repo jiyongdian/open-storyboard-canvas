@@ -191,6 +191,8 @@ pub fn run() {
             image::save_image_source_to_directory,
             image::save_video_source_to_path,
             image::save_video_source_to_directory,
+            image::save_audio_source_to_path,
+            image::load_audio_source_data_url,
             image::save_image_source_to_app_debug_dir,
             image::copy_image_source_to_clipboard,
             image::read_system_clipboard,

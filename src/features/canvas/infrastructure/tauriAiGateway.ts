@@ -5,6 +5,9 @@ import {
   submitGenerateImageJob,
 } from '@/commands/ai';
 import { imageUrlToDataUrl, persistImageLocally } from '@/features/canvas/application/imageData';
+import { uploadImageToConfiguredHost } from '@/features/canvas/application/imageHosting';
+import { useSettingsStore } from '@/stores/settingsStore';
+import { normalizeVideoInputSchema } from '../application/videoInputSchema';
 
 import type { AiGateway, GenerateImagePayload } from '../application/ports';
 import { submitDreaminaJob, getDreaminaJob } from './dreaminaGateway';
@@ -46,6 +49,8 @@ export interface GenerateVideoDebugPreview {
     size: string;
     aspectRatio: string;
     referenceImages?: unknown[];
+    referenceVideos?: unknown[];
+    referenceAudios?: unknown[];
     extraParams?: unknown;
   };
   providerRequest?: CustomProviderRequestDebugPreview;
@@ -72,7 +77,20 @@ async function normalizeVideoReferenceImages(payload: GenerateVideoPayload): Pro
     ...(payload.referenceImages ?? []),
   ];
   if (sources.length === 0) return undefined;
-  return await Promise.all(sources.map(async (imageUrl) => await imageUrlToDataUrl(imageUrl)));
+  const inputSchema = normalizeVideoInputSchema(payload.extraParams?.videoInputSchema);
+  const limitedSources = inputSchema.images.enabled
+    ? sources.slice(0, inputSchema.images.max)
+    : [];
+  if (limitedSources.length === 0) return undefined;
+  if (inputSchema.images.requireImageHost) {
+    const imageHostSettings = useSettingsStore.getState().imageHostSettings;
+    return await Promise.all(
+      limitedSources.map(async (imageUrl, index) =>
+        await uploadImageToConfiguredHost(imageUrl, index, imageHostSettings)
+      )
+    );
+  }
+  return await Promise.all(limitedSources.map(async (imageUrl) => await imageUrlToDataUrl(imageUrl)));
 }
 
 function summarizeDebugString(value: string, maxLength = 500): string {
@@ -162,6 +180,8 @@ export async function buildGenerateVideoDebugPreview(
     size: payload.size,
     aspect_ratio: payload.aspectRatio ?? 'auto',
     reference_images: normalizedReferenceImages,
+    reference_videos: payload.referenceVideos,
+    reference_audios: payload.referenceAudios,
     extra_params: {
       ...(payload.extraParams ?? {}),
       ...(typeof payload.seconds === 'number' ? { seconds: payload.seconds } : {}),
@@ -176,6 +196,8 @@ export async function buildGenerateVideoDebugPreview(
       size: payload.size,
       aspectRatio: payload.aspectRatio ?? 'auto',
       referenceImages: normalizedReferenceImages?.map((image) => summarizeDebugString(image)),
+      referenceVideos: payload.referenceVideos,
+      referenceAudios: payload.referenceAudios,
       extraParams: summarizeDebugValue(request.extra_params),
     },
     providerRequest: buildCustomVideoProviderRequestDebugPreview(request),
@@ -229,6 +251,8 @@ export const tauriAiGateway: AiGateway = {
       size: payload.size,
       aspect_ratio: payload.aspectRatio ?? 'auto',
       reference_images: normalizedReferenceImages,
+      reference_videos: payload.referenceVideos,
+      reference_audios: payload.referenceAudios,
       extra_params: {
         ...(payload.extraParams ?? {}),
         ...(typeof payload.seconds === 'number' ? { seconds: payload.seconds } : {}),

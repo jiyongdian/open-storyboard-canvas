@@ -8,6 +8,11 @@ import {
 } from '@/stores/customProvidersStore';
 import { hasCustomProviderCredential } from '@/features/canvas/application/providerAvailability';
 import { useSettingsStore } from '@/stores/settingsStore';
+import {
+  defaultVideoInputSchemaForProviderKind,
+  resolveVideoInputSchemaFromExtraParams,
+  type VideoInputSchema,
+} from './videoInputSchema';
 
 export interface VideoCatalogEntry {
   id: string;
@@ -18,6 +23,7 @@ export interface VideoCatalogEntry {
   supportedDurations: string[];
   supportedResolutions: string[];
   supportedAspectRatios: string[];
+  inputSchema: VideoInputSchema;
   usable: boolean;
   notReadyReason?: string;
 }
@@ -101,6 +107,7 @@ export function buildVideoModelCatalog(
         supportedDurations,
         supportedResolutions,
         supportedAspectRatios,
+        inputSchema: resolveVideoInputSchemaFromExtraParams(provider.extraParams, modelId),
         usable,
         notReadyReason: usable
           ? undefined
@@ -121,6 +128,7 @@ export function buildVideoModelCatalog(
         supportedDurations: AGNES_DURATIONS,
         supportedResolutions: AGNES_VIDEO_RESOLUTIONS,
         supportedAspectRatios: DEFAULT_ASPECT_RATIOS,
+        inputSchema: defaultVideoInputSchemaForProviderKind('agnes-video'),
         usable: true,
       });
     }

@@ -12,6 +12,8 @@
     "edit": "Edit",
     "close": "Close",
     "loading": "Loading...",
+    "saving": "Saving...",
+    "saved": "Saved",
     "error": "Error",
     "success": "Success",
     "imageMissing": "Image missing",
@@ -88,6 +90,13 @@
     "retryFetch": "Retry Fetch",
     "downloadSuccess": "Download succeeded",
     "downloadFailed": "Download failed",
+    "audioTrim": "Trim Audio",
+    "audioTrimDialogTitle": "Trim Audio",
+    "audioTrimStart": "Start",
+    "audioTrimEnd": "End",
+    "audioTrimApply": "Trim",
+    "audioTrimming": "Trimming...",
+    "audioTrimHint": "Trimming creates a new audio node. The original audio is not overwritten.",
     "ungroup": "Ungroup",
     "saveAs": "Save as...",
     "noDownloadPresetPathsHint": "No preset path. Add one in Settings > General.",
@@ -753,6 +762,8 @@
       "aiImageGeneration": "AI Image",
       "aiVideoGeneration": "AI Video",
       "aiTextGeneration": "AI Text",
+      "aiAudioGeneration": "AI Audio",
+      "audio": "Audio",
       "storyboard": "Storyboard Node",
       "storyboardGen": "Storyboard Generation",
       "textAnnotation": "Text Node",
@@ -831,6 +842,29 @@
       "selectModel": "Select model",
       "noProviderModels": "This provider has no selectable models yet",
       "staleResult": "The result may be stale"
+    },
+    "aiAudio": {
+      "promptPlaceholder": "Enter text to synthesize, or connect a text node as input",
+      "textRequired": "Enter text to synthesize, or connect a text node",
+      "noModel": "Configure and enable an audio model in Settings first",
+      "noVoice": "No synced voices",
+      "generated": "Audio result generated",
+      "generateFailed": "Audio generation failed",
+      "generate": "Generate audio",
+      "outputTitle": "Audio Result",
+      "textInputCount": "Text inputs {{count}}",
+      "staleResult": "Inputs changed; the result may be stale",
+      "payloadDebug": "Preview audio request content",
+      "payloadDebugTitle": "Audio Payload Preview",
+      "payloadDebugHint": "This shows the exact audio gateway payload and the provider request assembled from it. For VoxCPM, dataMap lists Gradio data[] fields by index; data URL audio is summarized and marked when actual generation will upload it before submit."
+    },
+    "audioNode": {
+      "waitingResult": "Waiting for audio result",
+      "generationFailed": "Audio generation failed",
+      "empty": "Click or drop audio here",
+      "generationElapsed": "Generation elapsed time",
+      "ready": "Ready to play",
+      "replace": "Replace audio"
     },
     "videoNode": {
       "waitingResult": "Waiting for video result",
@@ -1066,6 +1100,51 @@
     "generalDesc": "Storyboard generation, prompt generation, and download paths",
     "keybindings": "Keybindings",
     "keybindingsDesc": "Configure mouse actions, canvas pan, and WASD movement habits",
+    "imageHosting": {
+      "title": "Image Hosting",
+      "desc": "Configure PiXhost or a private image host. Image hosting is used only when enabled.",
+      "enable": "Enable image hosting",
+      "enableDesc": "When off, the configuration is kept but upload and save flows will not use image hosting.",
+      "provider": "Image host",
+      "providerDesc": "Choose the host to use when image hosting is enabled.",
+      "providers": {
+        "pixhost": "PiXhost",
+        "seedvault": "Private host"
+      },
+      "apiBaseUrl": "API base URL / domain",
+      "restoreDefaults": "Reset",
+      "pixhost": {
+        "title": "PiXhost",
+        "desc": "Change the API base URL here when PiXhost rotates domains.",
+        "contentType": "Content type",
+        "contentTypes": {
+          "family": "Family safe",
+          "adult": "Adult"
+        },
+        "maxThumbnailSize": "Max thumbnail size"
+      },
+      "seedvault": {
+        "title": "Private Image Host",
+        "desc": "On save, /tokens is called with email and password, then the returned token overwrites the current token.",
+        "email": "Account email",
+        "password": "Password",
+        "strategyId": "Upload strategy ID",
+        "strategyIdPlaceholder": "Leave empty for default strategy",
+        "token": "Token",
+        "tokenPlaceholder": "Generated after saving credentials, or paste manually",
+        "tokenHint": "After account or password is re-entered, saving refreshes the token.",
+        "tokenWillRefresh": "Account or password changed. Saving will generate a new token."
+      },
+      "errors": {
+        "missingSeedvaultCredentials": "Enter the private host account email and password first.",
+        "tokenRequestFailed": "Failed to fetch private host token. Check the account, password, and API base URL.",
+        "invalidTokenResponse": "The private host response did not contain a usable token.",
+        "saveFailed": "Failed to save image hosting settings."
+      }
+    },
+    "audioModels": {
+      "title": "Audio Models"
+    },
     "canvasInteraction": {
       "title": "Canvas Operation Habits",
       "desc": "Configure mouse bindings, box selection, node context menus, and WASD canvas pan.",
@@ -1276,7 +1355,7 @@
     "collapseNodeActionToolbarByDefault": "Collapse image node toolbars",
     "collapseNodeActionToolbarByDefaultDesc": "When enabled, AI image and image nodes only show a small hint when selected. Click it to expand the toolbar, then click again to collapse it.",
     "showNodePayloadPreview": "Node payload preview",
-    "showNodePayloadPreviewDesc": "When enabled, AI image, AI video, and AI text nodes show a request payload preview button in the upper-right corner.",
+    "showNodePayloadPreviewDesc": "When enabled, AI image, AI video, AI audio, and AI text nodes show a request payload preview button in the upper-right corner.",
     "enableAiTextStreaming": "AI text streaming (experimental)",
     "enableAiTextStreamingDesc": "Experimental switch only. The current chat transport still returns complete responses, so generation falls back to normal full-response output.",
     "useLegacyPanoramaControlDirection": "Use legacy panorama drag direction",
