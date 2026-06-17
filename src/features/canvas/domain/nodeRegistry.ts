@@ -177,6 +177,7 @@ const aiTextNodeDefinition: CanvasNodeDefinition<AiTextNodeData> = {
     resultNodeId: null,
     lastRunInputHash: null,
     lastPreparedPayload: null,
+    lastPayloadDiagnostics: null,
     lastOutputType: null,
     lastError: null,
   }),

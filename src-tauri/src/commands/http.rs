@@ -53,6 +53,15 @@ pub struct HttpResponseDto {
     pub text: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HttpStreamResponseDto {
+    pub status: u16,
+    pub text: String,
+    pub byte_length: usize,
+    pub chunk_count: usize,
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct HttpStreamEventDto {
@@ -284,6 +293,43 @@ fn emit_stream_event(app: &AppHandle, event: HttpStreamEventDto) {
     let _ = app.emit("custom-http-stream", event);
 }
 
+fn take_decodable_utf8(pending: &mut Vec<u8>, flush: bool) -> Option<String> {
+    if pending.is_empty() {
+        return None;
+    }
+
+    match std::str::from_utf8(pending) {
+        Ok(text) => {
+            let output = text.to_string();
+            pending.clear();
+            Some(output)
+        }
+        Err(error) => {
+            let valid_up_to = error.valid_up_to();
+            if valid_up_to > 0 {
+                let output = String::from_utf8_lossy(&pending[..valid_up_to]).to_string();
+                pending.drain(..valid_up_to);
+                return Some(output);
+            }
+
+            if error.error_len().is_none() && !flush {
+                return None;
+            }
+
+            if flush {
+                let output = String::from_utf8_lossy(pending).to_string();
+                pending.clear();
+                return Some(output);
+            }
+
+            let drain_len = error.error_len().unwrap_or(1).min(pending.len());
+            let output = String::from_utf8_lossy(&pending[..drain_len]).to_string();
+            pending.drain(..drain_len);
+            Some(output)
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn custom_http_request(request: HttpRequestDto) -> Result<HttpResponseDto, String> {
     let client = shared_http_client();
@@ -305,7 +351,7 @@ pub async fn custom_http_stream_request(
     app: AppHandle,
     request: HttpRequestDto,
     stream_id: String,
-) -> Result<u16, String> {
+) -> Result<HttpStreamResponseDto, String> {
     let normalized_stream_id = stream_id.trim().to_string();
     if normalized_stream_id.is_empty() {
         return Err("streamId is required".to_string());
@@ -317,74 +363,117 @@ pub async fn custom_http_stream_request(
         .await
         .map_err(|err| {
             let message = format!("HTTP request failed: {err}");
-            emit_stream_event(&app, HttpStreamEventDto {
-                stream_id: normalized_stream_id.clone(),
-                kind: "error".to_string(),
-                status: None,
-                chunk: None,
-                error: Some(message.clone()),
-            });
+            emit_stream_event(
+                &app,
+                HttpStreamEventDto {
+                    stream_id: normalized_stream_id.clone(),
+                    kind: "error".to_string(),
+                    status: None,
+                    chunk: None,
+                    error: Some(message.clone()),
+                },
+            );
             message
         })?;
     let status = response.status().as_u16();
 
-    emit_stream_event(&app, HttpStreamEventDto {
-        stream_id: normalized_stream_id.clone(),
-        kind: "status".to_string(),
-        status: Some(status),
-        chunk: None,
-        error: None,
-    });
+    emit_stream_event(
+        &app,
+        HttpStreamEventDto {
+            stream_id: normalized_stream_id.clone(),
+            kind: "status".to_string(),
+            status: Some(status),
+            chunk: None,
+            error: None,
+        },
+    );
 
-    let mut error_text = String::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|err| {
-            let message = format!("HTTP response stream read failed: {err}");
-            emit_stream_event(&app, HttpStreamEventDto {
+    let mut error_bytes: Vec<u8> = Vec::new();
+    let mut full_bytes: Vec<u8> = Vec::new();
+    let mut pending_utf8: Vec<u8> = Vec::new();
+    let mut chunk_count = 0usize;
+    while let Some(chunk) = response.chunk().await.map_err(|err| {
+        let message = format!("HTTP response stream read failed: {err}");
+        emit_stream_event(
+            &app,
+            HttpStreamEventDto {
                 stream_id: normalized_stream_id.clone(),
                 kind: "error".to_string(),
                 status: Some(status),
                 chunk: None,
                 error: Some(message.clone()),
-            });
-            message
-        })?
-    {
-        let text = String::from_utf8_lossy(&chunk).to_string();
+            },
+        );
+        message
+    })? {
+        chunk_count += 1;
+        full_bytes.extend_from_slice(&chunk);
         if status < 200 || status >= 300 {
-            error_text.push_str(&text);
+            error_bytes.extend_from_slice(&chunk);
         }
-        emit_stream_event(&app, HttpStreamEventDto {
-            stream_id: normalized_stream_id.clone(),
-            kind: "chunk".to_string(),
-            status: Some(status),
-            chunk: Some(text),
-            error: None,
-        });
+        pending_utf8.extend_from_slice(&chunk);
+        if let Some(text) = take_decodable_utf8(&mut pending_utf8, false) {
+            emit_stream_event(
+                &app,
+                HttpStreamEventDto {
+                    stream_id: normalized_stream_id.clone(),
+                    kind: "chunk".to_string(),
+                    status: Some(status),
+                    chunk: Some(text),
+                    error: None,
+                },
+            );
+        }
+    }
+
+    if let Some(text) = take_decodable_utf8(&mut pending_utf8, true) {
+        emit_stream_event(
+            &app,
+            HttpStreamEventDto {
+                stream_id: normalized_stream_id.clone(),
+                kind: "chunk".to_string(),
+                status: Some(status),
+                chunk: Some(text),
+                error: None,
+            },
+        );
     }
 
     if status < 200 || status >= 300 {
+        let error_text = String::from_utf8_lossy(&error_bytes).to_string();
         let preview: String = error_text.chars().take(1000).collect();
         let message = format!("HTTP {status}: {preview}");
-        emit_stream_event(&app, HttpStreamEventDto {
-            stream_id: normalized_stream_id.clone(),
-            kind: "error".to_string(),
-            status: Some(status),
-            chunk: None,
-            error: Some(message.clone()),
-        });
+        emit_stream_event(
+            &app,
+            HttpStreamEventDto {
+                stream_id: normalized_stream_id.clone(),
+                kind: "error".to_string(),
+                status: Some(status),
+                chunk: None,
+                error: Some(message.clone()),
+            },
+        );
         return Err(message);
     }
 
-    emit_stream_event(&app, HttpStreamEventDto {
-        stream_id: normalized_stream_id,
-        kind: "done".to_string(),
-        status: Some(status),
-        chunk: None,
-        error: None,
-    });
+    let byte_length = full_bytes.len();
+    let text = String::from_utf8_lossy(&full_bytes).to_string();
 
-    Ok(status)
+    emit_stream_event(
+        &app,
+        HttpStreamEventDto {
+            stream_id: normalized_stream_id,
+            kind: "done".to_string(),
+            status: Some(status),
+            chunk: None,
+            error: None,
+        },
+    );
+
+    Ok(HttpStreamResponseDto {
+        status,
+        text,
+        byte_length,
+        chunk_count,
+    })
 }

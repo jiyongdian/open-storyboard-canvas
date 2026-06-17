@@ -36,8 +36,18 @@ const MIN_HEIGHT = 240;
 const MAX_WIDTH = 1600;
 const MAX_HEIGHT = 1100;
 const DEFAULT_STRUCTURED_COLUMN_WIDTH = 220;
-const MIN_STRUCTURED_COLUMN_WIDTH = 96;
+const LONG_TEXT_STRUCTURED_COLUMN_WIDTH = 720;
+const COMPACT_STRUCTURED_COLUMN_WIDTH = 84;
+const MIN_STRUCTURED_COLUMN_WIDTH = 56;
 const MAX_STRUCTURED_COLUMN_WIDTH = 720;
+const COMPACT_STRUCTURED_COLUMN_LABELS = new Set([
+  '分镜序号',
+  '分镜时长',
+  '序号',
+  '时长',
+  '编号',
+  'id',
+]);
 
 function safeStringify(value: unknown): string {
   try {
@@ -183,7 +193,17 @@ function resolveStructuredColumnWidth(
   const key = resolveStructuredColumnKey(group, field);
   const width = widths?.[key];
   if (typeof width !== 'number' || !Number.isFinite(width)) {
-    return DEFAULT_STRUCTURED_COLUMN_WIDTH;
+    const label = resolveGroupedFieldLabel(field, group.pathPrefixTokens).trim();
+    const normalizedLabel = label.toLowerCase();
+    const compactByLabel =
+      COMPACT_STRUCTURED_COLUMN_LABELS.has(label)
+      || COMPACT_STRUCTURED_COLUMN_LABELS.has(normalizedLabel);
+    const compactByValue = field.value.length <= 16 && label.length <= 6;
+    return compactByLabel || compactByValue
+      ? COMPACT_STRUCTURED_COLUMN_WIDTH
+      : field.value.length >= 120
+      ? LONG_TEXT_STRUCTURED_COLUMN_WIDTH
+      : DEFAULT_STRUCTURED_COLUMN_WIDTH;
   }
   return Math.min(MAX_STRUCTURED_COLUMN_WIDTH, Math.max(MIN_STRUCTURED_COLUMN_WIDTH, Math.round(width)));
 }
@@ -196,6 +216,18 @@ function resolveStructuredTableWidth(
     (total, field) => total + resolveStructuredColumnWidth(widths, group, field),
     0
   );
+}
+
+function resolveStructuredColumnRenderWidth(
+  widths: Record<string, number>,
+  group: StructuredTableGroup,
+  field: ResolvedDisplayField,
+  index: number
+): number | string {
+  if (index === group.fields.length - 1) {
+    return 'auto';
+  }
+  return resolveStructuredColumnWidth(widths, group, field);
 }
 
 function resolveGroupedFieldLabel(field: ResolvedDisplayField, pathPrefixTokens: string[]): string {
@@ -218,6 +250,37 @@ function resolveJsonCardDimension(value: number | undefined, min: number, fallba
     return fallback;
   }
   return Math.round(value);
+}
+
+function areJsonValuesEquivalent(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) {
+    return true;
+  }
+
+  try {
+    return JSON.stringify(left) === JSON.stringify(right);
+  } catch {
+    return false;
+  }
+}
+
+function areDisplayFieldsEquivalent(
+  left: JsonCardNodeData['displayFields'],
+  right: ResolvedDisplayField[]
+): boolean {
+  const normalizedLeft = Array.isArray(left) ? left : [];
+  if (normalizedLeft.length !== right.length) {
+    return false;
+  }
+
+  return normalizedLeft.every((field, index) => {
+    const nextField = right[index];
+    return (
+      field.path === nextField.path
+      && field.label === nextField.label
+      && field.value === nextField.value
+    );
+  });
 }
 
 export const JsonCardNode = memo(({ id, data, selected, width, height }: JsonCardNodeProps) => {
@@ -266,12 +329,23 @@ export const JsonCardNode = memo(({ id, data, selected, width, height }: JsonCar
       : createAutoDisplayFields(effectiveParsedJson),
     [configuredFields, effectiveParsedJson, liveAgentFields]
   );
-  const isStreaming = data.isStreaming === true || data.isGenerating === true;
   const generationStartedAt = typeof data.generationStartedAt === 'number' ? data.generationStartedAt : null;
+  const hasStaleStreamingFlag =
+    data.isStreaming === true
+    && data.isGenerating === false
+    && generationStartedAt === null;
+  const isStreaming =
+    data.isGenerating === true
+    || (data.isStreaming === true && !hasStaleStreamingFlag);
   const liveGenerationElapsedMs = isStreaming && generationStartedAt !== null
     ? Math.max(0, now - generationStartedAt)
     : data.generationElapsedMs;
   const generationElapsedText = formatGenerationElapsedMs(liveGenerationElapsedMs);
+  const streamPreview = typeof data.streamPreview === 'string' ? data.streamPreview.trim() : '';
+  const streamReceivedCharacters =
+    typeof data.streamReceivedCharacters === 'number' && Number.isFinite(data.streamReceivedCharacters)
+      ? Math.max(0, Math.round(data.streamReceivedCharacters))
+      : 0;
   const tableGroups = useMemo(
     () => resolveStructuredTableGroups(effectiveParsedJson, selectedFields),
     [effectiveParsedJson, selectedFields]
@@ -287,6 +361,9 @@ export const JsonCardNode = memo(({ id, data, selected, width, height }: JsonCar
   );
   const shouldShowStructuredTable = !isStreaming && tableGroups.length > 0;
   const shouldShowStructuredFields = !isStreaming && fieldBlocks.length > 0;
+  const generationWarning = typeof data.generationWarning === 'string' && data.generationWarning.trim()
+    ? data.generationWarning.trim()
+    : null;
   const structuredColumnWidths = useMemo(
     () => (
       data.structuredColumnWidths
@@ -322,6 +399,18 @@ export const JsonCardNode = memo(({ id, data, selected, width, height }: JsonCar
   }, [isStreaming]);
 
   useEffect(() => {
+    if (!hasStaleStreamingFlag) {
+      return;
+    }
+
+    updateNodeData(id, {
+      isStreaming: false,
+      streamPreview: null,
+      streamReceivedCharacters: null,
+    });
+  }, [hasStaleStreamingFlag, id, updateNodeData]);
+
+  useEffect(() => {
     if (isStreaming || !data.rawContent.trim()) {
       return;
     }
@@ -330,25 +419,30 @@ export const JsonCardNode = memo(({ id, data, selected, width, height }: JsonCar
     if (repairedResult.kind !== 'json' || repairedResult.parsedJson === undefined) {
       return;
     }
-    if (!data.parseError && data.parsedJson === repairedResult.parsedJson) {
-      return;
-    }
+
+    const nextRawContent = repairedResult.rawContent || data.rawContent;
+    const nextParsedJson = repairedResult.parsedJson;
+    const nextParseError = repairedResult.parseError ?? null;
+    const nextDisplayFields = resolveJsonCardDisplayFields(sourceAgent, nextParsedJson);
+    const currentParseError = data.parseError ?? null;
+
     if (
-      !data.parseError
-      && data.parsedJson !== null
-      && data.parsedJson !== undefined
-      && JSON.stringify(data.parsedJson) === JSON.stringify(repairedResult.parsedJson)
+      data.rawContent === nextRawContent
+      && currentParseError === nextParseError
+      && areJsonValuesEquivalent(data.parsedJson, nextParsedJson)
+      && areDisplayFieldsEquivalent(data.displayFields, nextDisplayFields)
     ) {
       return;
     }
 
     updateNodeData(id, {
-      rawContent: repairedResult.rawContent || data.rawContent,
-      parsedJson: repairedResult.parsedJson,
-      parseError: repairedResult.parseError ?? null,
-      displayFields: resolveJsonCardDisplayFields(sourceAgent, repairedResult.parsedJson),
+      rawContent: nextRawContent,
+      parsedJson: nextParsedJson,
+      parseError: nextParseError,
+      displayFields: nextDisplayFields,
     });
   }, [
+    data.displayFields,
     data.parseError,
     data.parsedJson,
     data.rawContent,
@@ -447,7 +541,7 @@ export const JsonCardNode = memo(({ id, data, selected, width, height }: JsonCar
                 {isStreaming ? (
                   <>
                     <LoaderCircle className="h-3 w-3 animate-spin text-accent" />
-                    流式
+                    生成中
                   </>
                 ) : shouldShowStructuredTable ? `结构化 ${tableRowCount}行` : shouldShowStructuredFields ? '结构化' : '原始'}
               </span>
@@ -482,13 +576,33 @@ export const JsonCardNode = memo(({ id, data, selected, width, height }: JsonCar
           onMouseDown={(event) => event.stopPropagation()}
           onPointerDown={(event) => event.stopPropagation()}
         >
-          {data.parseError && !isStreaming ? (
+          {isStreaming ? (
+            <div className="flex h-full min-h-[180px] flex-col justify-center gap-4 rounded-lg border border-[var(--canvas-node-field-border)] bg-[rgba(15,23,42,0.28)] p-4">
+              <div className="flex items-center gap-2 text-sm font-medium text-text-dark">
+                <LoaderCircle className="h-4 w-4 animate-spin text-accent" />
+                正在生成 JSON，完成后自动解析结构化展示
+              </div>
+              <div className="text-xs leading-5 text-text-muted">
+                已接收 {streamReceivedCharacters.toLocaleString()} 字
+                {generationElapsedText ? ` · ${generationElapsedText}` : ''}
+              </div>
+              <div className="rounded-md border border-[var(--canvas-node-field-border)] bg-[var(--canvas-node-field-bg)] px-3 py-2 text-xs leading-5 text-text-muted">
+                {streamPreview || '等待模型返回内容...'}
+              </div>
+            </div>
+          ) : data.parseError ? (
             <div className="mb-2 rounded-md border border-amber-400/25 bg-amber-500/10 px-2.5 py-2 text-xs text-amber-200">
               JSON 解析失败: {data.parseError}
             </div>
           ) : null}
 
-          {shouldShowStructuredTable || shouldShowStructuredFields ? (
+          {generationWarning && !isStreaming ? (
+            <div className="mb-2 rounded-md border border-amber-400/25 bg-amber-500/10 px-2.5 py-2 text-xs leading-5 text-amber-100">
+              {generationWarning}
+            </div>
+          ) : null}
+
+          {!isStreaming && (shouldShowStructuredTable || shouldShowStructuredFields) ? (
             <div className="flex min-h-0 flex-col gap-4">
               {tableGroups.map((group) => (
                 <div key={group.key} className="min-h-0">
@@ -499,13 +613,23 @@ export const JsonCardNode = memo(({ id, data, selected, width, height }: JsonCar
                   ) : null}
                   <table
                     className="min-w-full table-fixed border-separate border-spacing-0 text-left text-xs text-text-dark"
-                    style={{ width: resolveStructuredTableWidth(effectiveColumnWidths, group) }}
+                    style={{
+                      width: '100%',
+                      minWidth: resolveStructuredTableWidth(effectiveColumnWidths, group),
+                    }}
                   >
                     <colgroup>
-                      {group.fields.map((field) => (
+                      {group.fields.map((field, fieldIndex) => (
                         <col
                           key={field.path}
-                          style={{ width: resolveStructuredColumnWidth(effectiveColumnWidths, group, field) }}
+                          style={{
+                            width: resolveStructuredColumnRenderWidth(
+                              effectiveColumnWidths,
+                              group,
+                              field,
+                              fieldIndex
+                            ),
+                          }}
                         />
                       ))}
                     </colgroup>
@@ -514,7 +638,7 @@ export const JsonCardNode = memo(({ id, data, selected, width, height }: JsonCar
                         {group.fields.map((field) => (
                           <th
                             key={field.path}
-                            className="relative border-b border-[var(--canvas-node-field-border)] px-2 py-2 text-[11px] font-semibold text-text-muted"
+                            className="relative border-b border-[var(--canvas-node-field-border)] px-1.5 py-2 text-[11px] font-semibold text-text-muted"
                             title={field.path}
                           >
                             <span className="block truncate">
@@ -538,7 +662,7 @@ export const JsonCardNode = memo(({ id, data, selected, width, height }: JsonCar
                           {group.fields.map((field) => (
                             <td
                               key={`${rowIndex}-${field.path}`}
-                              className="border-b border-[var(--canvas-node-field-border)] px-2 py-2 leading-5"
+                              className="border-b border-[var(--canvas-node-field-border)] px-1.5 py-2 leading-5"
                             >
                               <div className="whitespace-pre-wrap break-words select-text">
                                 {resolveRowValue(row, field.path, group.pathPrefixTokens)}
@@ -568,11 +692,11 @@ export const JsonCardNode = memo(({ id, data, selected, width, height }: JsonCar
                 </div>
               ) : null}
             </div>
-          ) : (
+          ) : !isStreaming ? (
             <pre className="whitespace-pre-wrap break-words select-text font-mono text-xs leading-6 text-text-dark">
               {rawJson || '暂无内容'}
             </pre>
-          )}
+          ) : null}
         </div>
 
         <Handle

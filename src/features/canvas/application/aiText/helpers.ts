@@ -318,9 +318,6 @@ function tryParseJson(raw: string): { parsed: unknown; content: string } | null 
 
 function normalizeJsonLikePunctuation(raw: string): string {
   const punctuationMap: Record<string, string> = {
-    '\u201c': '"',
-    '\u201d': '"',
-    '\uff02': '"',
     '\uff0c': ',',
     '\uff1a': ':',
     '\uff3b': '[',
@@ -328,9 +325,79 @@ function normalizeJsonLikePunctuation(raw: string): string {
     '\uff5b': '{',
     '\uff5d': '}',
   };
-  return raw.replace(/[\u201c\u201d\uff02\uff0c\uff1a\uff3b\uff3d\uff5b\uff5d]/g, (char) =>
+  const punctuationNormalized = raw.replace(/[\uff0c\uff1a\uff3b\uff3d\uff5b\uff5d]/g, (char) =>
     punctuationMap[char] ?? char
   );
+
+  let result = '';
+  let inString = false;
+  let escaped = false;
+  let changed = punctuationNormalized !== raw;
+
+  const previousNonWhitespace = (index: number): string => {
+    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+      if (!/\s/.test(punctuationNormalized[cursor])) {
+        return punctuationNormalized[cursor];
+      }
+    }
+    return '';
+  };
+  const nextNonWhitespace = (index: number): string => {
+    for (let cursor = index + 1; cursor < punctuationNormalized.length; cursor += 1) {
+      if (!/\s/.test(punctuationNormalized[cursor])) {
+        return punctuationNormalized[cursor];
+      }
+    }
+    return '';
+  };
+
+  for (let index = 0; index < punctuationNormalized.length; index += 1) {
+    const char = punctuationNormalized[index];
+    const isJsonLikeQuote = char === '\u201c' || char === '\u201d' || char === '\uff02';
+
+    if (!inString) {
+      if (isJsonLikeQuote && /[\{\[\:,]/.test(previousNonWhitespace(index))) {
+        result += '"';
+        inString = true;
+        changed = true;
+        continue;
+      }
+      result += char;
+      if (char === '"') {
+        inString = true;
+      }
+      continue;
+    }
+
+    if (escaped) {
+      result += char;
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      result += char;
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      result += char;
+      inString = false;
+      continue;
+    }
+
+    if (isJsonLikeQuote && /[\:\,\}\]]/.test(nextNonWhitespace(index))) {
+      result += '"';
+      inString = false;
+      changed = true;
+      continue;
+    }
+
+    result += char;
+  }
+
+  return changed ? result : raw;
 }
 
 function escapeJsonStringControlChars(raw: string): string {
@@ -389,7 +456,7 @@ function escapeJsonStringControlChars(raw: string): string {
   return changed ? result : raw;
 }
 
-function tryParseJsonFragment(raw: string): { parsed: unknown; content: string } | null {
+function tryParseJsonFragment(raw: string): { parsed: unknown; content: string; parseError?: string | null } | null {
   const originalJson = tryParseJsonFragmentCandidate(raw);
   const normalized = normalizeJsonLikePunctuation(raw);
   if (normalized === raw) {
@@ -407,13 +474,18 @@ function tryParseJsonFragment(raw: string): { parsed: unknown; content: string }
   return originalJson;
 }
 
-function tryParseJsonFragmentCandidate(raw: string): { parsed: unknown; content: string } | null {
+function tryParseJsonFragmentCandidate(raw: string): { parsed: unknown; content: string; parseError?: string | null } | null {
   const trimmed = raw.trimStart();
   const firstObjectIndex = raw.indexOf('{');
   const firstArrayIndex = raw.indexOf('[');
 
   if (trimmed.startsWith('{')) {
     return tryParseJsonFragmentWithRoot(raw, '{');
+  }
+
+  if (trimmed.startsWith('[')) {
+    return tryParseJsonFragmentWithRoot(raw, '[')
+      ?? tryParsePartialJsonArray(raw);
   }
 
   if (
@@ -427,13 +499,17 @@ function tryParseJsonFragmentCandidate(raw: string): { parsed: unknown; content:
   }
 
   const arrayJson = tryParseJsonFragmentWithRoot(raw, '[');
-  return arrayJson ?? tryParseJsonFragmentWithRoot(raw, '{');
+  return arrayJson
+    ?? (firstArrayIndex >= 0 && (firstObjectIndex < 0 || firstArrayIndex < firstObjectIndex)
+      ? tryParsePartialJsonArray(raw)
+      : null)
+    ?? tryParseJsonFragmentWithRoot(raw, '{');
 }
 
 function tryParseJsonFragmentWithRoot(
   raw: string,
   rootChar: '[' | '{'
-): { parsed: unknown; content: string } | null {
+): { parsed: unknown; content: string; parseError?: string | null } | null {
   const escapedRoot = rootChar === '[' ? '\\[' : '{';
   const starts = [...raw.matchAll(new RegExp(escapedRoot, 'g'))]
     .map((match) => match.index ?? -1)
@@ -493,6 +569,101 @@ function tryParseJsonFragmentWithRoot(
   }
 
   return null;
+}
+
+function tryParsePartialJsonArray(raw: string): { parsed: unknown[]; content: string; parseError: string } | null {
+  const arrayStart = raw.indexOf('[');
+  if (arrayStart < 0) {
+    return null;
+  }
+
+  const items: unknown[] = [];
+  let index = arrayStart + 1;
+
+  while (index < raw.length) {
+    while (index < raw.length && /[\s,]/.test(raw[index])) {
+      index += 1;
+    }
+    if (index >= raw.length || raw[index] === ']') {
+      break;
+    }
+
+    const rootChar = raw[index];
+    if (rootChar !== '{' && rootChar !== '[') {
+      break;
+    }
+
+    const stack: string[] = [];
+    let inString = false;
+    let escaped = false;
+    let valueEnd = -1;
+
+    for (let cursor = index; cursor < raw.length; cursor += 1) {
+      const char = raw[cursor];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char === '\\') {
+          escaped = true;
+          continue;
+        }
+        if (char === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === '"') {
+        inString = true;
+        continue;
+      }
+      if (char === '{') {
+        stack.push('}');
+        continue;
+      }
+      if (char === '[') {
+        stack.push(']');
+        continue;
+      }
+      if (char !== '}' && char !== ']') {
+        continue;
+      }
+      if (stack.length === 0 || stack[stack.length - 1] !== char) {
+        valueEnd = -1;
+        break;
+      }
+      stack.pop();
+      if (stack.length === 0) {
+        valueEnd = cursor + 1;
+        break;
+      }
+    }
+
+    if (valueEnd <= index) {
+      break;
+    }
+
+    const candidate = raw.slice(index, valueEnd);
+    const parsed = tryParseJson(candidate);
+    if (!parsed) {
+      break;
+    }
+    items.push(parsed.parsed);
+    index = valueEnd;
+  }
+
+  if (items.length === 0) {
+    return null;
+  }
+
+  return {
+    parsed: items,
+    content: raw.trim(),
+    parseError: `JSON 数组未完整闭合，已解析前 ${items.length} 条完整项。`,
+  };
 }
 
 function appendFlattenedPaths(
@@ -818,6 +989,10 @@ function createJsonPart(
   };
 }
 
+function createJsonPartUsageKey(nodeId: string, jsonPath?: string): string {
+  return `${nodeId}::${jsonPath?.trim() || '$'}`;
+}
+
 function createImagePart(node: CanvasNode, label: string): AiTextInputImagePart | null {
   if (!isUploadNode(node) && !isImageEditNode(node) && !isExportImageNode(node)) {
     return null;
@@ -1025,7 +1200,9 @@ export function collectAiTextInputs(
 
   const parts: AiTextInputPart[] = [];
   const used = new Set<string>();
+  const usedJsonParts = new Set<string>();
   const configs = agent?.inputSources.filter((item) => item.enabled) ?? [];
+  const hasExplicitSourceConfig = configs.some((item) => Boolean(item.sourceAgentId));
 
   configs.forEach((config) => {
     if (config.type === 'markdown' && config.sourceAgentId) {
@@ -1044,7 +1221,11 @@ export function collectAiTextInputs(
 
     if (config.type === 'json' && config.sourceAgentId) {
       const agentJsonNode = findAgentJsonOutputNode(nodeId, nodes, config.sourceAgentId);
-      if (!agentJsonNode || used.has(agentJsonNode.id)) {
+      if (!agentJsonNode) {
+        return;
+      }
+      const usageKey = createJsonPartUsageKey(agentJsonNode.id, config.jsonPath);
+      if (usedJsonParts.has(usageKey)) {
         return;
       }
       const part = createJsonPart(agentJsonNode, resolveInputPartLabel(config, sourceAgents), config.jsonPath);
@@ -1052,7 +1233,7 @@ export function collectAiTextInputs(
         return;
       }
       parts.push(part);
-      used.add(agentJsonNode.id);
+      usedJsonParts.add(usageKey);
       return;
     }
 
@@ -1068,30 +1249,32 @@ export function collectAiTextInputs(
     used.add(candidate.id);
   });
 
-  (['markdown', 'json', 'image', 'video'] as const).forEach((type) => {
-    let index = 0;
-    pool[type].forEach((node) => {
-      if (used.has(node.id)) {
-        return;
-      }
-      index += 1;
-      const fallbackLabel =
-        referenceByNodeId.get(node.id)?.label
-        || resolveNodeDisplayName(node.type, node.data)
-        || createDefaultLabel(type, index);
-      const part = buildPartFromConfig(node, {
-        id: createSourceConfigId(),
-        type,
-        label: fallbackLabel,
-        enabled: true,
-      }, referenceByNodeId.get(node.id));
-      if (!part) {
-        return;
-      }
-      parts.push(part);
-      used.add(node.id);
+  if (!hasExplicitSourceConfig) {
+    (['markdown', 'json', 'image', 'video'] as const).forEach((type) => {
+      let index = 0;
+      pool[type].forEach((node) => {
+        if (used.has(node.id)) {
+          return;
+        }
+        index += 1;
+        const fallbackLabel =
+          referenceByNodeId.get(node.id)?.label
+          || resolveNodeDisplayName(node.type, node.data)
+          || createDefaultLabel(type, index);
+        const part = buildPartFromConfig(node, {
+          id: createSourceConfigId(),
+          type,
+          label: fallbackLabel,
+          enabled: true,
+        }, referenceByNodeId.get(node.id));
+        if (!part) {
+          return;
+        }
+        parts.push(part);
+        used.add(node.id);
+      });
     });
-  });
+  }
 
   return parts;
 }
@@ -1216,6 +1399,15 @@ export function resolveAiTextResult(raw: string): AiTextResolvedResult {
         parsedJson: fencedJson.parsed,
         parseError: null,
       };
+    }
+    const fencedFragmentJson = tryParseJsonFragment(fencedContent);
+    if (fencedFragmentJson) {
+      return {
+        kind: 'json',
+        rawContent: normalized,
+        parsedJson: fencedFragmentJson.parsed,
+        parseError: fencedFragmentJson.parseError ?? null,
+      };
     } else {
       return {
         kind: 'markdown',
@@ -1232,7 +1424,7 @@ export function resolveAiTextResult(raw: string): AiTextResolvedResult {
       kind: 'json',
       rawContent: normalized,
       parsedJson: fragmentJson.parsed,
-      parseError: null,
+      parseError: fragmentJson.parseError ?? null,
     };
   }
 

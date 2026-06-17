@@ -29,6 +29,7 @@ import { clearBrowserTextSelection } from '@/features/canvas/application/textSel
 import { useChatModelCatalog, type ChatCatalogEntry } from '@/features/canvas/application/chatModelCatalog';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
 import {
+  buildCustomChatCompletionRequestDebugPreview,
   streamCustomChatCompletion,
   submitCustomChatCompletion,
 } from '@/features/canvas/infrastructure/customProviderGateway';
@@ -72,6 +73,87 @@ function serializeDebugJson(value: unknown): string {
   }
 }
 
+function sanitizePayloadPreviewForDisplay(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return value;
+  }
+  const record = value as Record<string, unknown>;
+  const {
+    inputDiagnostics: _inputDiagnostics,
+    responseDiagnostics: _responseDiagnostics,
+    providerRequest,
+    payload,
+    ...rest
+  } = record;
+
+  return {
+    ...rest,
+    payload,
+    providerRequest,
+  };
+}
+
+function isLengthLimitedFinishReason(reason: string | null | undefined): boolean {
+  return /length|max[_-]?tokens?|token[_-]?limit|output[_-]?limit|incomplete/i.test(reason ?? '');
+}
+
+function buildLengthLimitedWarning(reason: string): string {
+  return `模型停止原因为 ${reason}，输出可能因为 token 上限被截断。请提高服务商配置里的 max_tokens/max_completion_tokens，或减少单次输出内容。`;
+}
+
+function hasExplicitAgentInputs(agent: { inputSources?: Array<{ enabled?: boolean; sourceAgentId?: string | null }> } | null | undefined): boolean {
+  return Boolean(agent?.inputSources?.some((source) => source.enabled !== false && Boolean(source.sourceAgentId)));
+}
+
+function collectStoryboardMarkers(value: string): string[] {
+  const markers: string[] = [];
+  const seen = new Set<string>();
+  const pattern = /【(E\d+-\d+)】/g;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(value)) !== null) {
+    const marker = match[1];
+    if (seen.has(marker)) {
+      continue;
+    }
+    seen.add(marker);
+    markers.push(marker);
+  }
+  return markers;
+}
+
+function resolveExpectedStoryboardMarkers(parts: Awaited<ReturnType<typeof collectAiTextInputs>>): string[] {
+  const markers: string[] = [];
+  const seen = new Set<string>();
+  parts.forEach((part) => {
+    if (part.kind !== 'text') {
+      return;
+    }
+    collectStoryboardMarkers(part.content).forEach((marker) => {
+      if (seen.has(marker)) {
+        return;
+      }
+      seen.add(marker);
+      markers.push(marker);
+    });
+  });
+  return markers;
+}
+
+function resolveOutputArrayLength(parsedJson: unknown): number | null {
+  return Array.isArray(parsedJson) ? parsedJson.length : null;
+}
+
+function buildCompletenessWarning(args: {
+  expectedCount: number;
+  actualCount: number;
+  finishReason: string | null;
+}): string | null {
+  if (args.expectedCount <= 1 || args.actualCount >= args.expectedCount) {
+    return null;
+  }
+  return `检测到输入里有 ${args.expectedCount} 个分镜候选段，但模型本次只返回了 ${args.actualCount} 条 JSON（finish_reason: ${args.finishReason ?? '未知'}）。payload 已包含全部候选段；这通常是模型按示例只生成了首条，建议在 Agent prompt 中明确“必须输出所有候选段，禁止只输出示例/首条”，或拆批生成。`;
+}
+
 function TextNodeIcon({ className = '' }: { className?: string }) {
   return (
     <span className={`inline-flex items-center justify-center text-sm font-semibold ${className}`}>
@@ -84,6 +166,24 @@ function waitForPreviewDelay(): Promise<void> {
   return new Promise((resolve) => {
     window.setTimeout(resolve, 260);
   });
+}
+
+const STREAM_PREVIEW_MAX_LENGTH = 260;
+const STREAM_PREVIEW_SEGMENT_LIMIT = 3;
+const STREAM_PREVIEW_UPDATE_INTERVAL_MS = 900;
+
+function createStreamPreview(fullText: string): string {
+  const normalized = fullText.replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return '';
+  }
+  const segments = normalized.match(/[^。！？.!?]+[。！？.!?]?/g) ?? [normalized];
+  const sentencePreview = segments.slice(0, STREAM_PREVIEW_SEGMENT_LIMIT).join('').trim();
+  const preview = sentencePreview.length >= 40 ? sentencePreview : normalized;
+  if (preview.length <= STREAM_PREVIEW_MAX_LENGTH) {
+    return preview;
+  }
+  return `${preview.slice(0, STREAM_PREVIEW_MAX_LENGTH)}...`;
 }
 
 function groupChatCatalogByProvider(entries: ChatCatalogEntry[]): TextProviderOption[] {
@@ -116,6 +216,7 @@ export const AiTextNode = memo(({ id, data, selected, width, height }: AiTextNod
   const findNodePosition = useCanvasStore((state) => state.findNodePosition);
   const textAgents = useSettingsStore((state) => state.textAgents);
   const showNodePayloadPreview = useSettingsStore((state) => state.showNodePayloadPreview);
+  const enableAiTextStreaming = useSettingsStore((state) => state.enableAiTextStreaming);
   const chatCatalog = useChatModelCatalog();
 
   const [providerOpen, setProviderOpen] = useState(false);
@@ -204,7 +305,7 @@ export const AiTextNode = memo(({ id, data, selected, width, height }: AiTextNod
       providerId: selectedProvider?.id ?? data.providerId ?? null,
       model: selectedModelEntry?.id ?? data.model,
       agentPrompt: selectedAgent?.prompt ?? '',
-      userPrompt: promptDraft,
+      userPrompt: hasExplicitAgentInputs(selectedAgent) ? '' : promptDraft,
       parts: inputParts,
     }),
     [data.agentId, data.model, data.providerId, inputParts, promptDraft, selectedAgent, selectedModelEntry, selectedProvider]
@@ -329,21 +430,26 @@ export const AiTextNode = memo(({ id, data, selected, width, height }: AiTextNod
     const entry = modelOverride ?? selectedModelEntry ?? availableModelOptions[0] ?? chatCatalog[0] ?? null;
     const latestCanvas = useCanvasStore.getState();
     const previewParts = collectAiTextInputs(id, latestCanvas.nodes, latestCanvas.edges, agent, textAgents);
+    const effectiveUserPrompt = hasExplicitAgentInputs(agent) ? '' : promptDraftRef.current;
+    const expectedStoryboardMarkers = resolveExpectedStoryboardMarkers(previewParts);
     const previewInputHash = computeAiTextInputHash({
       agentId: agent?.id ?? data.agentId ?? null,
       providerId: entry?.providerId ?? selectedProvider?.id ?? data.providerId ?? null,
       model: entry?.id ?? data.model,
       agentPrompt: agent?.prompt ?? '',
-      userPrompt: promptDraftRef.current,
+      userPrompt: effectiveUserPrompt,
       parts: previewParts,
     });
-    const previewComposedPrompt = buildAiTextUserPrompt(previewParts, promptDraftRef.current);
+    const previewComposedPrompt = buildAiTextUserPrompt(previewParts, effectiveUserPrompt);
     const payload = await buildOpenAiChatPayload({
       model: entry?.modelId ?? data.model,
       agentPrompt: agent?.prompt ?? '',
-      userPrompt: promptDraftRef.current,
+      userPrompt: effectiveUserPrompt,
       parts: previewParts,
     });
+    const providerRequest = entry
+      ? buildCustomChatCompletionRequestDebugPreview(entry.id, payload, true)
+      : null;
 
     return {
       provider: entry
@@ -368,7 +474,23 @@ export const AiTextNode = memo(({ id, data, selected, width, height }: AiTextNod
         : null,
       inputHash: previewInputHash,
       textPrompt: previewComposedPrompt,
+      inputDiagnostics: {
+        userPromptIncluded: effectiveUserPrompt.trim().length > 0,
+        userPromptIgnoredBecauseExplicitAgentInputs: hasExplicitAgentInputs(agent),
+        partCount: previewParts.length,
+        expectedStoryboardItemCount: expectedStoryboardMarkers.length,
+        expectedStoryboardMarkers,
+        parts: previewParts.map((part) => ({
+          kind: part.kind,
+          sourceType: part.sourceType,
+          sourceNodeId: part.sourceNodeId,
+          label: part.label,
+          jsonPath: part.kind === 'text' ? part.jsonPath ?? null : null,
+          contentCharacters: part.kind === 'text' ? part.content.length : null,
+        })),
+      },
       payload,
+      providerRequest,
     };
   }, [
     data.agentId,
@@ -433,6 +555,10 @@ export const AiTextNode = memo(({ id, data, selected, width, height }: AiTextNod
           generationElapsedMs: null,
           sourceAiNodeId: id,
           sourceAgentId: agent.id,
+          generationFinishReason: null,
+          generationWarning: null,
+          streamPreview: null,
+          streamReceivedCharacters: 0,
         }
       );
       outputNodeId = resultNodeId;
@@ -440,13 +566,27 @@ export const AiTextNode = memo(({ id, data, selected, width, height }: AiTextNod
       await waitForPreviewDelay();
       let rawOutput = '';
       let usedStreaming = false;
-      try {
+      let finishReason: string | null = null;
+      let responseStatus: number | null = null;
+      let requestDebug: unknown = payloadPreview.providerRequest ?? null;
+      let rawStreamTail: string | null = null;
+      let streamDiagnostics: unknown = null;
+      let responseUsage: unknown = null;
+      let streamFailureWarning: string | null = null;
+      let lastStreamPreviewUpdateAt = 0;
+      if (enableAiTextStreaming) try {
         usedStreaming = true;
         const streamResult = await streamCustomChatCompletion(nextEntry.id, payloadPreview.payload, {
           onTextDelta: (_delta, fullText) => {
             rawOutput = fullText;
+            const now = Date.now();
+            if (now - lastStreamPreviewUpdateAt < STREAM_PREVIEW_UPDATE_INTERVAL_MS) {
+              return;
+            }
+            lastStreamPreviewUpdateAt = now;
             updateNodeData(resultNodeId, {
-              rawContent: fullText,
+              streamPreview: createStreamPreview(fullText),
+              streamReceivedCharacters: fullText.length,
               isStreaming: true,
               isGenerating: true,
               generationStartedAt,
@@ -456,39 +596,156 @@ export const AiTextNode = memo(({ id, data, selected, width, height }: AiTextNod
             });
           },
         });
-        rawOutput = streamResult.text;
+        if (streamResult.text.trim()) {
+          rawOutput = streamResult.text;
+        }
+        if (rawOutput.trim()) {
+          updateNodeData(resultNodeId, {
+            streamPreview: createStreamPreview(rawOutput),
+            streamReceivedCharacters: rawOutput.length,
+            isStreaming: true,
+            isGenerating: true,
+            generationStartedAt,
+            generationElapsedMs: null,
+            sourceAiNodeId: id,
+            sourceAgentId: agent.id,
+          });
+        }
+        finishReason = streamResult.finishReason ?? null;
+        responseStatus = typeof streamResult.status === 'number' ? streamResult.status : null;
+        requestDebug = streamResult.requestDebug ?? requestDebug;
+        rawStreamTail = streamResult.rawStreamTail ?? null;
+        streamDiagnostics = streamResult.streamDiagnostics ?? null;
+        responseUsage = streamResult.usage ?? null;
       } catch (streamError) {
-        usedStreaming = false;
-        rawOutput = '';
         const message = streamError instanceof Error ? streamError.message : String(streamError);
-        setNotice(`${t('node.aiText.streamingFallback')} ${message}`);
-        updateNodeData(resultNodeId, {
-          rawContent: '',
-          isStreaming: false,
-          isGenerating: true,
-          generationStartedAt,
-          generationElapsedMs: null,
-        });
+        const diagnosticError = streamError as {
+          status?: number;
+          requestDebug?: unknown;
+          rawStreamTail?: string | null;
+          streamDiagnostics?: unknown;
+        };
+        responseStatus = typeof diagnosticError.status === 'number' ? diagnosticError.status : responseStatus;
+        requestDebug = diagnosticError.requestDebug ?? requestDebug;
+        rawStreamTail = diagnosticError.rawStreamTail ?? rawStreamTail;
+        streamDiagnostics = diagnosticError.streamDiagnostics ?? streamDiagnostics;
+        if (rawOutput.trim()) {
+          streamFailureWarning = `流式输出中断，已保留已收到的内容。错误：${message}`;
+          finishReason = finishReason ?? 'stream_error';
+          setNotice(streamFailureWarning);
+          updateNodeData(resultNodeId, {
+            streamPreview: createStreamPreview(rawOutput),
+            streamReceivedCharacters: rawOutput.length,
+            isStreaming: false,
+            isGenerating: true,
+            generationStartedAt,
+            generationElapsedMs: null,
+          });
+        } else {
+          usedStreaming = false;
+          setNotice(`${t('node.aiText.streamingFallback')} ${message}`);
+          updateNodeData(resultNodeId, {
+            rawContent: '',
+            isStreaming: false,
+            isGenerating: true,
+            generationStartedAt,
+            generationElapsedMs: null,
+          });
+        }
       }
 
-      if (!rawOutput) {
+      if (!rawOutput.trim()) {
         const result = await submitCustomChatCompletion(nextEntry.id, payloadPreview.payload);
         rawOutput = result.text;
+        finishReason = result.finishReason ?? finishReason;
+        responseStatus = typeof result.status === 'number' ? result.status : responseStatus;
+        requestDebug = result.requestDebug ?? requestDebug;
+        responseUsage = result.usage ?? responseUsage;
+        streamDiagnostics = result.usage
+          ? {
+            ...(streamDiagnostics && typeof streamDiagnostics === 'object' ? streamDiagnostics : {}),
+            usage: result.usage,
+          }
+          : streamDiagnostics;
       }
-      const resolvedResult = resolveAiTextResult(rawOutput);
+      let effectiveRawOutput = rawOutput;
+      if (!effectiveRawOutput.trim()) {
+        const existingResultNode = useCanvasStore
+          .getState()
+          .nodes.find((node) => node.id === resultNodeId);
+        const existingRawContent =
+          existingResultNode?.type === CANVAS_NODE_TYPES.jsonCard
+          && typeof existingResultNode.data.rawContent === 'string'
+            ? existingResultNode.data.rawContent
+            : '';
+        if (existingRawContent.trim()) {
+          effectiveRawOutput = existingRawContent;
+        }
+      }
+      const resolvedResult = resolveAiTextResult(effectiveRawOutput);
       const parsedJson = resolvedResult.kind === 'json' ? resolvedResult.parsedJson ?? null : null;
-      const parseError = resolvedResult.kind === 'json'
+      const baseParseError = resolvedResult.kind === 'json'
         ? resolvedResult.parseError ?? null
         : resolvedResult.parseError ?? '模型返回内容不是合法 JSON';
+      const lengthLimited = isLengthLimitedFinishReason(finishReason);
+      const generationWarning = lengthLimited && finishReason
+        ? buildLengthLimitedWarning(finishReason)
+        : null;
+      const expectedStoryboardCount = payloadPreview.inputDiagnostics.expectedStoryboardItemCount;
+      const outputArrayLength = resolveOutputArrayLength(parsedJson);
+      const completenessWarning = outputArrayLength !== null
+        ? buildCompletenessWarning({
+          expectedCount: expectedStoryboardCount,
+          actualCount: outputArrayLength,
+          finishReason,
+        })
+        : null;
+      const combinedGenerationWarning = [streamFailureWarning, generationWarning, completenessWarning]
+        .filter((item): item is string => Boolean(item))
+        .join('\n');
+      const parseError = parsedJson === null && generationWarning
+        ? '模型输出因长度限制截断，JSON 不完整。'
+        : baseParseError;
       const displayFields = parsedJson !== null
         ? resolveJsonCardDisplayFields(agent, parsedJson)
         : [];
       const generationElapsedMs = Math.max(0, Date.now() - generationStartedAt);
+      const payloadDiagnostics = {
+        inputDiagnostics: payloadPreview.inputDiagnostics,
+        responseDiagnostics: {
+          status: responseStatus,
+          finishReason,
+          usedStreaming,
+          outputCharacters: effectiveRawOutput.length,
+          parsedAs: resolvedResult.kind,
+          parseError,
+          outputJsonArrayLength: outputArrayLength,
+          expectedStoryboardItemCount: expectedStoryboardCount,
+          usage: responseUsage,
+          outputCompleteness: outputArrayLength !== null
+            ? {
+              expected: expectedStoryboardCount,
+              actual: outputArrayLength,
+              complete: expectedStoryboardCount <= 1 || outputArrayLength >= expectedStoryboardCount,
+            }
+            : null,
+          rawStreamTail,
+          streamDiagnostics,
+        },
+      };
+      const preparedPayload = {
+        ...payloadPreview,
+        providerRequest: requestDebug,
+      };
       updateNodeData(resultNodeId, {
-        rawContent: resolvedResult.rawContent || rawOutput,
+        rawContent: resolvedResult.rawContent || effectiveRawOutput,
         parsedJson,
         parseError,
         displayFields,
+        generationFinishReason: finishReason,
+        generationWarning: combinedGenerationWarning || null,
+        streamPreview: null,
+        streamReceivedCharacters: null,
         isStreaming: false,
         isGenerating: false,
         generationStartedAt: null,
@@ -501,7 +758,8 @@ export const AiTextNode = memo(({ id, data, selected, width, height }: AiTextNod
         providerId: nextEntry.providerId,
         model: nextEntry.id,
         resultNodeId,
-        lastPreparedPayload: payloadPreview,
+        lastPreparedPayload: preparedPayload,
+        lastPayloadDiagnostics: payloadDiagnostics,
         lastRunInputHash: payloadPreview.inputHash,
         lastOutputType: 'json',
         lastError: null,
@@ -517,12 +775,15 @@ export const AiTextNode = memo(({ id, data, selected, width, height }: AiTextNod
       if (outputNodeId) {
         const elapsed = Math.max(0, Date.now() - generationStartedAt);
         updateNodeData(outputNodeId, {
+          isStreaming: false,
           isGenerating: false,
           generationStartedAt: null,
           generationElapsedMs: elapsed,
+          generationWarning: message,
         });
       }
       const runtimeDiagnostics = await getRuntimeDiagnostics();
+      const errorReportUserPrompt = hasExplicitAgentInputs(agent) ? '' : promptDraftRef.current;
       const reportText = buildGenerationErrorReport({
         errorMessage: message,
         errorDetails: resolvedError.details,
@@ -530,7 +791,7 @@ export const AiTextNode = memo(({ id, data, selected, width, height }: AiTextNod
           sourceType: 'aiText',
           providerId: nextEntry.providerId,
           requestModel: nextEntry.modelId,
-          prompt: buildAiTextUserPrompt(inputParts, promptDraftRef.current),
+          prompt: buildAiTextUserPrompt(inputParts, errorReportUserPrompt),
           referenceImageCount: inputParts.filter((part) => part.kind === 'image').length,
           referenceImagePlaceholders: createReferenceImagePlaceholders(
             inputParts.filter((part) => part.kind === 'image').length
@@ -556,6 +817,7 @@ export const AiTextNode = memo(({ id, data, selected, width, height }: AiTextNod
     buildPayloadPreview,
     chatCatalog,
     data.model,
+    enableAiTextStreaming,
     enabledAgents,
     findNodePosition,
     id,
@@ -646,7 +908,7 @@ export const AiTextNode = memo(({ id, data, selected, width, height }: AiTextNod
 
     try {
       const existingPayload = data.lastPreparedPayload ?? await buildPayloadPreview();
-      setPayloadDebugText(serializeDebugJson(existingPayload));
+      setPayloadDebugText(serializeDebugJson(sanitizePayloadPreviewForDisplay(existingPayload)));
     } catch (debugError) {
       const resolvedError = resolveErrorContent(debugError, t('common.error'));
       void showErrorDialog(

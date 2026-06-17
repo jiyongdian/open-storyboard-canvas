@@ -3,6 +3,7 @@ import { ReactFlowProvider } from '@xyflow/react';
 import { invoke } from '@tauri-apps/api/core';
 import { Canvas } from './features/canvas/Canvas';
 import { TitleBar } from './components/TitleBar';
+import { AppErrorBoundary } from './components/AppErrorBoundary';
 import { SettingsDialog } from './components/SettingsDialog';
 import { UpdateAvailableDialog, type UpdateIgnoreMode } from './components/UpdateAvailableDialog';
 import { GlobalErrorDialog } from './components/GlobalErrorDialog';
@@ -201,49 +202,53 @@ function App() {
   if (!isHydrated) {
     return (
       <ReactFlowProvider>
-        <div className="w-full h-full bg-bg-dark" />
+        <AppErrorBoundary>
+          <div className="w-full h-full bg-bg-dark" />
+        </AppErrorBoundary>
       </ReactFlowProvider>
     );
   }
 
   return (
     <ReactFlowProvider>
-      <div className="w-full h-full flex flex-col bg-bg-dark">
-        <TitleBar
-          onSettingsClick={() => {
-            setSettingsInitialCategory('general');
-            setShowSettings(true);
-          }}
-          showBackButton={!!currentProjectId}
-          onBackClick={closeProject}
-        />
+      <AppErrorBoundary>
+        <div className="w-full h-full flex flex-col bg-bg-dark">
+          <TitleBar
+            onSettingsClick={() => {
+              setSettingsInitialCategory('general');
+              setShowSettings(true);
+            }}
+            showBackButton={!!currentProjectId}
+            onBackClick={closeProject}
+          />
 
-        <main className="relative min-h-0 flex-1 overflow-hidden">
-          {currentProjectId ? <Canvas /> : <ProjectHome />}
-        </main>
+          <main className="relative min-h-0 flex-1 overflow-hidden">
+            {currentProjectId ? <Canvas /> : <ProjectHome />}
+          </main>
 
-        <SettingsDialog
-          isOpen={showSettings}
-          onClose={() => setShowSettings(false)}
-          initialCategory={settingsInitialCategory}
-          onCheckUpdate={handleManualCheckUpdate}
-        />
-        <UpdateAvailableDialog
-          isOpen={showUpdateDialog}
-          onClose={() => setShowUpdateDialog(false)}
-          latestVersion={latestVersion}
-          currentVersion={currentVersion}
-          onApplyIgnore={handleApplyIgnore}
-        />
-        <GlobalErrorDialog
-          isOpen={Boolean(globalError)}
-          title={globalError?.title ?? ''}
-          message={globalError?.message ?? ''}
-          details={globalError?.details}
-          copyText={globalError?.copyText}
-          onClose={() => setGlobalError(null)}
-        />
-      </div>
+          <SettingsDialog
+            isOpen={showSettings}
+            onClose={() => setShowSettings(false)}
+            initialCategory={settingsInitialCategory}
+            onCheckUpdate={handleManualCheckUpdate}
+          />
+          <UpdateAvailableDialog
+            isOpen={showUpdateDialog}
+            onClose={() => setShowUpdateDialog(false)}
+            latestVersion={latestVersion}
+            currentVersion={currentVersion}
+            onApplyIgnore={handleApplyIgnore}
+          />
+          <GlobalErrorDialog
+            isOpen={Boolean(globalError)}
+            title={globalError?.title ?? ''}
+            message={globalError?.message ?? ''}
+            details={globalError?.details}
+            copyText={globalError?.copyText}
+            onClose={() => setGlobalError(null)}
+          />
+        </div>
+      </AppErrorBoundary>
     </ReactFlowProvider>
   );
 }

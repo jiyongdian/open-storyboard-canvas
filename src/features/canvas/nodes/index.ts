@@ -15,23 +15,24 @@ import { StoryboardNode } from './StoryboardNode';
 import { TextAnnotationNode } from './TextAnnotationNode';
 import { UploadNode } from './UploadNode';
 import { VideoNode } from './VideoNode';
+import { withNodeRenderErrorBoundary } from './NodeRenderErrorBoundary';
 
 export const nodeTypes: NodeTypes = {
-  aiAudioNode: AiAudioNode,
-  aiTextNode: AiTextNode,
-  aiVideoNode: AiVideoNode,
-  audioNode: AudioNode,
-  blueprintNode: BlueprintNode,
-  exportImageNode: ImageNode,
-  groupNode: GroupNode,
-  imageNode: ImageEditNode,
-  jsonCardNode: JsonCardNode,
-  panoramaNode: PanoramaNode,
-  storyboardGenNode: StoryboardGenNode,
-  storyboardNode: StoryboardNode,
-  textAnnotationNode: TextAnnotationNode,
-  uploadNode: UploadNode,
-  videoNode: VideoNode,
+  aiAudioNode: withNodeRenderErrorBoundary(AiAudioNode),
+  aiTextNode: withNodeRenderErrorBoundary(AiTextNode),
+  aiVideoNode: withNodeRenderErrorBoundary(AiVideoNode),
+  audioNode: withNodeRenderErrorBoundary(AudioNode),
+  blueprintNode: withNodeRenderErrorBoundary(BlueprintNode),
+  exportImageNode: withNodeRenderErrorBoundary(ImageNode),
+  groupNode: withNodeRenderErrorBoundary(GroupNode),
+  imageNode: withNodeRenderErrorBoundary(ImageEditNode),
+  jsonCardNode: withNodeRenderErrorBoundary(JsonCardNode),
+  panoramaNode: withNodeRenderErrorBoundary(PanoramaNode),
+  storyboardGenNode: withNodeRenderErrorBoundary(StoryboardGenNode),
+  storyboardNode: withNodeRenderErrorBoundary(StoryboardNode),
+  textAnnotationNode: withNodeRenderErrorBoundary(TextAnnotationNode),
+  uploadNode: withNodeRenderErrorBoundary(UploadNode),
+  videoNode: withNodeRenderErrorBoundary(VideoNode),
 };
 
 export {

@@ -113,6 +113,10 @@ export interface JsonCardNodeData extends NodeDisplayData {
   parseError?: string | null;
   displayFields?: JsonCardDisplayField[];
   structuredColumnWidths?: Record<string, number>;
+  generationFinishReason?: string | null;
+  generationWarning?: string | null;
+  streamPreview?: string | null;
+  streamReceivedCharacters?: number | null;
   isStreaming?: boolean;
   isGenerating?: boolean;
   generationStartedAt?: number | null;
@@ -178,6 +182,7 @@ export interface AiTextNodeData extends NodeDisplayData {
   resultNodeId?: string | null;
   lastRunInputHash?: string | null;
   lastPreparedPayload?: unknown;
+  lastPayloadDiagnostics?: unknown;
   lastOutputType?: 'markdown' | 'json' | null;
   lastError?: string | null;
   [key: string]: unknown;

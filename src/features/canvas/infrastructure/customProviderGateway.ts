@@ -2,6 +2,7 @@ import {
   customHttpRequest,
   customHttpStreamRequest,
   type CustomHttpMultipartBody,
+  type CustomHttpStreamResponse,
   type GenerateRequest,
   type GenerationJobStatus,
 } from '@/commands/ai';
@@ -76,6 +77,7 @@ const POLL_TIMEOUT_MS = 120000;
 const VIDEO_POLL_TIMEOUT_MS = 15 * 60 * 1000;
 const CONNECTIVITY_TEST_POLL_TIMEOUT_MS = 180000;
 const GENERATION_REQUEST_TIMEOUT_MS = 180000;
+const CHAT_COMPLETION_REQUEST_TIMEOUT_MS = 30 * 60 * 1000;
 const GENERATION_SUBMIT_NETWORK_RETRY_ATTEMPTS = 2;
 const GENERATION_SUBMIT_NETWORK_RETRY_DELAY_MS = 700;
 const GENERATION_SUBMIT_NETWORK_ERROR_PREFIX = '提交阶段网络请求失败';
@@ -85,6 +87,8 @@ const RESULT_POLL_NETWORK_RETRY_ATTEMPTS = 3;
 const RESULT_POLL_MAX_CONSECUTIVE_NETWORK_FAILURES = 8;
 const RESULT_POLL_RETRY_HTTP_STATUSES = [408, 425, 429, 500, 502, 503, 504, 520, 522, 524];
 const DEFAULT_OPENAI_VIDEO_ENDPOINT_PATH = '/v1/videos';
+const DEFAULT_ANTHROPIC_CHAT_MAX_TOKENS = 8192;
+const DEFAULT_AGNES_CHAT_MAX_COMPLETION_TOKENS = 65500;
 
 export interface CustomProviderRequestDebugPreview {
   providerLabel: string;
@@ -95,6 +99,7 @@ export interface CustomProviderRequestDebugPreview {
   bodyMode: CustomProviderBodyMode;
   url: string;
   headers: Record<string, string>;
+  timeoutMs?: number;
   body?: unknown;
   multipart?: unknown;
   error?: string;
@@ -104,16 +109,79 @@ export interface CustomChatCompletionResult {
   text: string;
   status?: number;
   raw: unknown;
+  finishReason?: string | null;
+  requestDebug?: CustomProviderRequestDebugPreview | null;
+  usage?: unknown;
 }
 
 export interface CustomChatCompletionStreamResult {
   text: string;
   status?: number;
+  finishReason?: string | null;
+  requestDebug?: CustomProviderRequestDebugPreview | null;
+  rawStreamTail?: string | null;
+  streamDiagnostics?: CustomChatCompletionStreamDiagnostics;
+  usage?: unknown;
 }
 
 export interface CustomChatCompletionStreamOptions {
   onTextDelta?: (delta: string, fullText: string) => void;
   onRawChunk?: (chunk: string) => void;
+}
+
+export class CustomChatCompletionStreamError extends Error {
+  status?: number;
+  requestDebug?: CustomProviderRequestDebugPreview | null;
+  rawStreamTail?: string | null;
+  streamDiagnostics?: CustomChatCompletionStreamDiagnostics;
+
+  constructor(
+    message: string,
+    details: {
+      status?: number;
+      requestDebug?: CustomProviderRequestDebugPreview | null;
+      rawStreamTail?: string | null;
+      streamDiagnostics?: CustomChatCompletionStreamDiagnostics;
+    },
+  ) {
+    super(message);
+    this.name = 'CustomChatCompletionStreamError';
+    this.status = details.status;
+    this.requestDebug = details.requestDebug;
+    this.rawStreamTail = details.rawStreamTail;
+    this.streamDiagnostics = details.streamDiagnostics;
+  }
+}
+
+export interface CustomChatCompletionStreamDiagnostics {
+  chunkCount: number;
+  dataLineCount: number;
+  parsedDataLineCount: number;
+  parseFailureCount: number;
+  deltaCount: number;
+  doneMarkerSeen: boolean;
+  completionEventSeen: boolean;
+  bridgeDoneSeen: boolean;
+  bridgeErrorMessage: string | null;
+  bridgeErrorStatus: number | null;
+  lastEventType: string | null;
+  lastDataLinePreview: string | null;
+  remainingBufferCharacters: number;
+  elapsedMs: number;
+  eventRawCharacters?: number;
+  eventTextCharacters?: number;
+  bridgeReturnedCharacters?: number;
+  bridgeReturnedByteLength?: number;
+  bridgeReturnedChunkCount?: number;
+  replayTextCharacters?: number;
+  replayDataLineCount?: number;
+  replayParsedDataLineCount?: number;
+  replayDeltaCount?: number;
+  replayParseFailureCount?: number;
+  replayDoneMarkerSeen?: boolean;
+  bridgeReplayUsed?: boolean;
+  finalTextSource?: 'event-stream' | 'bridge-response';
+  usage?: unknown;
 }
 
 class NetworkRequestError extends Error {
@@ -1173,6 +1241,17 @@ function buildRequestHeaders(
 
 function chatProviderKind(cfg: CustomProviderConfig): string {
   return typeof cfg.extraParams?.providerKind === 'string' ? cfg.extraParams.providerKind : '';
+}
+
+function resolveChatRequestTimeoutMs(cfg: CustomProviderConfig): number {
+  const raw =
+    cfg.extraParams?.chatTimeoutMs
+    ?? cfg.extraParams?.textTimeoutMs
+    ?? cfg.extraParams?.timeoutMs;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0
+    ? Math.max(CHAT_COMPLETION_REQUEST_TIMEOUT_MS, parsed)
+    : CHAT_COMPLETION_REQUEST_TIMEOUT_MS;
 }
 
 function isAnthropicChatProvider(cfg: CustomProviderConfig): boolean {
@@ -3937,7 +4016,7 @@ function resolveChatCompletionBody(
       ...defaultParams,
       model: modelName,
       system: textFromUnknown(systemMessage?.content) ?? undefined,
-      max_tokens: defaultParams.max_tokens ?? 2048,
+      max_tokens: defaultParams.max_tokens ?? DEFAULT_ANTHROPIC_CHAT_MAX_TOKENS,
       messages: userMessages.map((message) => ({
         role: (message as { role?: unknown }).role === 'assistant' ? 'assistant' : 'user',
         content: textFromUnknown((message as { content?: unknown }).content) ?? '',
@@ -3960,6 +4039,7 @@ function resolveChatCompletionBody(
     const normalizedPayload = { ...payloadRecord };
     delete normalizedPayload.stream;
     return {
+      max_completion_tokens: DEFAULT_AGNES_CHAT_MAX_COMPLETION_TOKENS,
       ...defaultParams,
       ...normalizedPayload,
       model: modelName,
@@ -3970,6 +4050,45 @@ function resolveChatCompletionBody(
     ...defaultParams,
     ...payloadRecord,
     model: modelName,
+  };
+}
+
+export function buildCustomChatCompletionRequestDebugPreview(
+  catalogModelId: string,
+  openAiPayload: unknown,
+  stream = false,
+): CustomProviderRequestDebugPreview {
+  const resolved = resolveProviderAndModel(catalogModelId);
+  if (!resolved) {
+    throw new Error('未找到可用的文本模型配置');
+  }
+  const { cfg, model } = resolved;
+  if (!isChatCustomProvider(cfg)) {
+    throw new Error('所选模型不是文本对话模型');
+  }
+  const url = resolveChatEndpointUrl(cfg, model);
+  const headers = stream
+    ? {
+      ...buildChatRequestHeaders(cfg, 'POST'),
+      Accept: 'text/event-stream',
+    }
+    : buildChatRequestHeaders(cfg, 'POST');
+  const body = resolveChatCompletionBody(cfg, model, openAiPayload);
+  const finalBody = stream && body && typeof body === 'object' && !Array.isArray(body)
+    ? { ...(body as Record<string, unknown>), stream: true }
+    : body;
+
+  return {
+    providerLabel: cfg.label,
+    providerId: cfg.id,
+    modelId: catalogModelId,
+    modelName: model,
+    method: 'POST',
+    bodyMode: 'json',
+    url: maskDebugUrl(url),
+    headers: summarizeDebugHeaders(headers),
+    timeoutMs: resolveChatRequestTimeoutMs(cfg),
+    body: summarizeDebugValue(finalBody),
   };
 }
 
@@ -4022,6 +4141,64 @@ function eventTypeFromUnknown(value: unknown): string | null {
   return text?.trim() || null;
 }
 
+interface ChatStreamParserState {
+  buffer: string;
+  isDone: boolean;
+  finishReason: string | null;
+  usage: unknown | null;
+  chunkCount: number;
+  dataLineCount: number;
+  parsedDataLineCount: number;
+  parseFailureCount: number;
+  deltaCount: number;
+  doneMarkerSeen: boolean;
+  completionEventSeen: boolean;
+  bridgeDoneSeen: boolean;
+  bridgeErrorMessage: string | null;
+  bridgeErrorStatus: number | null;
+  lastEventType: string | null;
+  lastDataLinePreview: string | null;
+}
+
+function createChatStreamParserState(): ChatStreamParserState {
+  return {
+    buffer: '',
+    isDone: false,
+    finishReason: null,
+    usage: null,
+    chunkCount: 0,
+    dataLineCount: 0,
+    parsedDataLineCount: 0,
+    parseFailureCount: 0,
+    deltaCount: 0,
+    doneMarkerSeen: false,
+    completionEventSeen: false,
+    bridgeDoneSeen: false,
+    bridgeErrorMessage: null,
+    bridgeErrorStatus: null,
+    lastEventType: null,
+    lastDataLinePreview: null,
+  };
+}
+
+function markChatStreamEventType(state: ChatStreamParserState, eventType: string | null): boolean {
+  if (!eventType) {
+    return false;
+  }
+  state.lastEventType = eventType;
+  if (
+    eventType === 'response.completed'
+    || eventType === 'message_stop'
+    || eventType === 'done'
+    || eventType === 'finish'
+    || eventType === 'completed'
+  ) {
+    state.completionEventSeen = true;
+    return true;
+  }
+  return false;
+}
+
 function extractOpenAiResponsesText(payload: unknown): string | null {
   const direct = textFromUnknown(getValueByPath(payload, 'output_text'));
   if (direct) return direct;
@@ -4045,6 +4222,52 @@ function extractChatText(payload: unknown): string | null {
     ?? textFromUnknown(payload);
 }
 
+function normalizeFinishReason(value: unknown): string | null {
+  if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') {
+    return null;
+  }
+  const text = String(value).trim();
+  return text || null;
+}
+
+function extractChatFinishReason(payload: unknown): string | null {
+  const direct =
+    normalizeFinishReason(getValueByPath(payload, 'choices[0].finish_reason'))
+    ?? normalizeFinishReason(getValueByPath(payload, 'choices[0].finishReason'))
+    ?? normalizeFinishReason(getValueByPath(payload, 'finish_reason'))
+    ?? normalizeFinishReason(getValueByPath(payload, 'finishReason'))
+    ?? normalizeFinishReason(getValueByPath(payload, 'stop_reason'))
+    ?? normalizeFinishReason(getValueByPath(payload, 'delta.stop_reason'))
+    ?? normalizeFinishReason(getValueByPath(payload, 'message.stop_reason'))
+    ?? normalizeFinishReason(getValueByPath(payload, 'candidates[0].finishReason'))
+    ?? normalizeFinishReason(getValueByPath(payload, 'candidates[0].finish_reason'))
+    ?? normalizeFinishReason(getValueByPath(payload, 'response.incomplete_details.reason'))
+    ?? normalizeFinishReason(getValueByPath(payload, 'incomplete_details.reason'));
+  if (direct) {
+    return direct;
+  }
+
+  const eventType = normalizeFinishReason(getValueByPath(payload, 'type'))
+    ?? normalizeFinishReason(getValueByPath(payload, 'event'));
+  if (eventType && /incomplete|length|max[_-]?tokens?/i.test(eventType)) {
+    return eventType;
+  }
+
+  const status = normalizeFinishReason(getValueByPath(payload, 'response.status'))
+    ?? normalizeFinishReason(getValueByPath(payload, 'status'));
+  if (status && /incomplete|length|max[_-]?tokens?/i.test(status)) {
+    return status;
+  }
+
+  return null;
+}
+
+function extractChatUsage(payload: unknown): unknown | null {
+  return getValueByPath(payload, 'usage')
+    ?? getValueByPath(payload, 'response.usage')
+    ?? null;
+}
+
 function extractChatStreamTextDelta(payload: unknown): string {
   return streamTextFromUnknown(getValueByPath(payload, 'choices[0].delta.content'))
     ?? streamTextFromUnknown(getValueByPath(payload, 'choices[0].message.content'))
@@ -4061,6 +4284,7 @@ function extractChatStreamTextDelta(payload: unknown): string {
 }
 
 function handleChatStreamDataLine(
+  state: ChatStreamParserState,
   line: string,
   onDelta: (delta: string) => void,
 ): boolean {
@@ -4068,36 +4292,45 @@ function handleChatStreamDataLine(
   if (!trimmed) {
     return false;
   }
+  state.dataLineCount += 1;
+  state.lastDataLinePreview = trimmed.slice(-500);
   if (trimmed === '[DONE]') {
+    state.doneMarkerSeen = true;
     return true;
   }
   const parsed = parseResponseText(trimmed);
   if (typeof parsed === 'string') {
+    state.parseFailureCount += 1;
     return false;
+  }
+  state.parsedDataLineCount += 1;
+  const finishReason = extractChatFinishReason(parsed);
+  if (finishReason) {
+    state.finishReason = finishReason;
+  }
+  const usage = extractChatUsage(parsed);
+  if (usage) {
+    state.usage = usage;
   }
   const eventType = eventTypeFromUnknown(getValueByPath(parsed, 'type'))
     ?? eventTypeFromUnknown(getValueByPath(parsed, 'event'));
-  if (
-    eventType === 'response.completed'
-    || eventType === 'message_stop'
-    || eventType === 'done'
-    || eventType === 'finish'
-    || eventType === 'completed'
-  ) {
+  if (markChatStreamEventType(state, eventType)) {
     return true;
   }
   const delta = extractChatStreamTextDelta(parsed);
   if (delta) {
+    state.deltaCount += 1;
     onDelta(delta);
   }
   return false;
 }
 
 function consumeChatStreamChunk(
-  state: { buffer: string; isDone: boolean },
+  state: ChatStreamParserState,
   chunk: string,
   onDelta: (delta: string) => void,
 ) {
+  state.chunkCount += 1;
   state.buffer += chunk;
   if (!/\r?\n\r?\n/.test(state.buffer)) {
     const lines = state.buffer.split(/\r?\n/);
@@ -4108,7 +4341,7 @@ function consumeChatStreamChunk(
       .filter((line) => !line.startsWith(':') && !line.startsWith('event:') && !line.startsWith('id:'))
       .forEach((line) => {
         const dataLine = line.startsWith('data:') ? line.slice(5).trim() : line;
-        if (handleChatStreamDataLine(dataLine, onDelta)) {
+        if (handleChatStreamDataLine(state, dataLine, onDelta)) {
           state.isDone = true;
         }
       });
@@ -4132,7 +4365,7 @@ function consumeChatStreamChunk(
     }
 
     dataLines.forEach((dataLine) => {
-      if (handleChatStreamDataLine(dataLine, onDelta)) {
+      if (handleChatStreamDataLine(state, dataLine, onDelta)) {
         state.isDone = true;
       }
     });
@@ -4140,7 +4373,7 @@ function consumeChatStreamChunk(
 }
 
 function flushChatStreamBuffer(
-  state: { buffer: string; isDone: boolean },
+  state: ChatStreamParserState,
   onDelta: (delta: string) => void,
 ) {
   const remaining = state.buffer.trim();
@@ -4154,10 +4387,85 @@ function flushChatStreamBuffer(
     .filter(Boolean)
     .forEach((line) => {
       const dataLine = line.startsWith('data:') ? line.slice(5).trim() : line;
-      if (handleChatStreamDataLine(dataLine, onDelta)) {
+      if (handleChatStreamDataLine(state, dataLine, onDelta)) {
         state.isDone = true;
       }
     });
+}
+
+function parseChatStreamText(rawStream: string): {
+  text: string;
+  state: ChatStreamParserState;
+} {
+  const state = createChatStreamParserState();
+  let text = '';
+  consumeChatStreamChunk(state, rawStream, (delta) => {
+    text += delta;
+  });
+  flushChatStreamBuffer(state, (delta) => {
+    text += delta;
+  });
+  return { text, state };
+}
+
+function extractChatTextFromRawStream(rawStream: string): string | null {
+  const trimmed = rawStream.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const parsed = parseResponseText(trimmed);
+  if (typeof parsed !== 'string') {
+    return extractChatText(parsed);
+  }
+
+  const dataLines = trimmed
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('data:'))
+    .map((line) => line.slice(5).trim())
+    .filter((line) => line && line !== '[DONE]');
+
+  if (dataLines.length === 0) {
+    return null;
+  }
+
+  const text = dataLines
+    .map((line) => {
+      const payload = parseResponseText(line);
+      return typeof payload === 'string'
+        ? null
+        : extractChatText(payload) ?? extractChatStreamTextDelta(payload);
+    })
+    .filter((item): item is string => Boolean(item))
+    .join('');
+
+  return text.trim() || null;
+}
+
+function buildChatStreamDiagnostics(
+  state: ChatStreamParserState,
+  elapsedMs: number,
+  extra: Partial<CustomChatCompletionStreamDiagnostics> = {},
+): CustomChatCompletionStreamDiagnostics {
+  return {
+    chunkCount: state.chunkCount,
+    dataLineCount: state.dataLineCount,
+    parsedDataLineCount: state.parsedDataLineCount,
+    parseFailureCount: state.parseFailureCount,
+    deltaCount: state.deltaCount,
+    doneMarkerSeen: state.doneMarkerSeen,
+    completionEventSeen: state.completionEventSeen,
+    bridgeDoneSeen: state.bridgeDoneSeen,
+    bridgeErrorMessage: state.bridgeErrorMessage,
+    bridgeErrorStatus: state.bridgeErrorStatus,
+    lastEventType: state.lastEventType,
+    lastDataLinePreview: state.lastDataLinePreview,
+    remainingBufferCharacters: state.buffer.length,
+    elapsedMs,
+    usage: state.usage ?? undefined,
+    ...extra,
+  };
 }
 
 export async function testCustomChatProviderConnectivity(
@@ -4221,18 +4529,26 @@ export async function submitCustomChatCompletion(
   const url = resolveChatEndpointUrl(cfg, model);
   const headers = buildChatRequestHeaders(cfg, 'POST');
   const body = resolveChatCompletionBody(cfg, model, openAiPayload);
+  const requestDebug = buildCustomChatCompletionRequestDebugPreview(catalogModelId, openAiPayload, false);
   const { status, parsed } = await requestJson(url, {
     method: 'POST',
     headers,
     bodyMode: 'json',
     body,
-    timeoutMs: 180000,
+    timeoutMs: resolveChatRequestTimeoutMs(cfg),
   });
   const extractedText = extractChatText(parsed);
   if (!extractedText) {
     throw new Error(`响应中未找到文本内容。响应预览：${previewPayload(parsed)}`);
   }
-  return { text: extractedText, status, raw: parsed };
+  return {
+    text: extractedText,
+    status,
+    raw: parsed,
+    finishReason: extractChatFinishReason(parsed),
+    requestDebug,
+    usage: extractChatUsage(parsed) ?? undefined,
+  };
 }
 
 export async function streamCustomChatCompletion(
@@ -4264,9 +4580,17 @@ export async function streamCustomChatCompletion(
   const streamBody = body && typeof body === 'object' && !Array.isArray(body)
     ? { ...(body as Record<string, unknown>), stream: true }
     : body;
-  const state = { buffer: '', isDone: false };
+  const requestDebug = buildCustomChatCompletionRequestDebugPreview(catalogModelId, openAiPayload, true);
+  const state = createChatStreamParserState();
+  const startedAt = Date.now();
   let fullText = '';
   let latestStatus: number | undefined;
+  let rawStreamTail = '';
+  let eventRawCharacters = 0;
+  let bridgeReplayUsed = false;
+  let replayState: ChatStreamParserState | null = null;
+  let replayText = '';
+  let streamResponse: CustomHttpStreamResponse | null = null;
 
   const appendDelta = (delta: string) => {
     if (!delta) {
@@ -4276,13 +4600,14 @@ export async function streamCustomChatCompletion(
     options.onTextDelta?.(delta, fullText);
   };
 
-  const status = await customHttpStreamRequest({
+  try {
+    streamResponse = await customHttpStreamRequest({
     url,
     method: 'POST',
     headers,
     bodyMode: 'json',
     body: streamBody,
-    timeoutMs: 180000,
+    timeoutMs: resolveChatRequestTimeoutMs(cfg),
   }, {
     onStatus: (statusCode) => {
       latestStatus = statusCode;
@@ -4290,21 +4615,119 @@ export async function streamCustomChatCompletion(
     onChunk: (chunk, statusCode) => {
       latestStatus = typeof statusCode === 'number' ? statusCode : latestStatus;
       options.onRawChunk?.(chunk);
+      eventRawCharacters += chunk.length;
+      rawStreamTail = `${rawStreamTail}${chunk}`.slice(-8000);
       consumeChatStreamChunk(state, chunk, appendDelta);
     },
     onDone: (statusCode) => {
       latestStatus = typeof statusCode === 'number' ? statusCode : latestStatus;
+      state.bridgeDoneSeen = true;
       flushChatStreamBuffer(state, appendDelta);
     },
+    onError: (message, statusCode) => {
+      state.bridgeErrorMessage = message;
+      state.bridgeErrorStatus = typeof statusCode === 'number' ? statusCode : null;
+    },
   });
+    latestStatus = streamResponse.status;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new CustomChatCompletionStreamError(message, {
+      status: latestStatus,
+      requestDebug,
+      rawStreamTail: rawStreamTail || null,
+      streamDiagnostics: buildChatStreamDiagnostics(
+        state,
+        Math.max(0, Date.now() - startedAt),
+        {
+          eventRawCharacters,
+          eventTextCharacters: fullText.length,
+          finalTextSource: 'event-stream',
+        }
+      ),
+    });
+  }
 
   flushChatStreamBuffer(state, appendDelta);
+  const eventTextCharacters = fullText.length;
+  if (streamResponse?.text) {
+    const replay = parseChatStreamText(streamResponse.text);
+    replayText = replay.text;
+    replayState = replay.state;
+    if (!state.finishReason && replayState.finishReason) {
+      state.finishReason = replayState.finishReason;
+    }
+    if (!state.usage && replayState.usage) {
+      state.usage = replayState.usage;
+    }
+    if (replayState.doneMarkerSeen) {
+      state.doneMarkerSeen = true;
+    }
+    if (replayState.completionEventSeen) {
+      state.completionEventSeen = true;
+    }
+    if (
+      replayText.trim()
+      && (
+        replayText.length > fullText.length
+        || (!state.bridgeDoneSeen && replayState.doneMarkerSeen)
+      )
+    ) {
+      fullText = replayText;
+      bridgeReplayUsed = true;
+    }
+    if (!fullText.trim()) {
+      const rawText = extractChatTextFromRawStream(streamResponse.text);
+      if (rawText) {
+        replayText = rawText;
+        fullText = rawText;
+        bridgeReplayUsed = true;
+      }
+    }
+    rawStreamTail = streamResponse.text.slice(-8000);
+  }
+
+  const diagnosticsExtra: Partial<CustomChatCompletionStreamDiagnostics> = {
+    eventRawCharacters,
+    eventTextCharacters,
+    bridgeReturnedCharacters: streamResponse?.text.length,
+    bridgeReturnedByteLength: streamResponse?.byteLength,
+    bridgeReturnedChunkCount: streamResponse?.chunkCount,
+    replayTextCharacters: replayText ? replayText.length : undefined,
+    replayDataLineCount: replayState?.dataLineCount,
+    replayParsedDataLineCount: replayState?.parsedDataLineCount,
+    replayDeltaCount: replayState?.deltaCount,
+    replayParseFailureCount: replayState?.parseFailureCount,
+    replayDoneMarkerSeen: replayState?.doneMarkerSeen,
+    bridgeReplayUsed,
+    finalTextSource: bridgeReplayUsed ? 'bridge-response' : 'event-stream',
+  };
+
   if (!fullText.trim()) {
+    throw new CustomChatCompletionStreamError('流式响应中未找到文本内容', {
+      status: latestStatus ?? streamResponse?.status,
+      requestDebug,
+      rawStreamTail: rawStreamTail || null,
+      streamDiagnostics: buildChatStreamDiagnostics(
+        state,
+        Math.max(0, Date.now() - startedAt),
+        diagnosticsExtra
+      ),
+    });
     throw new Error('流式响应中未找到文本内容');
   }
   return {
     text: fullText,
-    status: latestStatus ?? status,
+    status: latestStatus ?? streamResponse?.status,
+    finishReason: state.finishReason,
+    requestDebug,
+    rawStreamTail: rawStreamTail || null,
+    streamDiagnostics: buildChatStreamDiagnostics(
+      state,
+      Math.max(0, Date.now() - startedAt),
+      diagnosticsExtra
+    ),
+    usage: state.usage ?? undefined,
   };
 }
 

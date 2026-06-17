@@ -245,6 +245,13 @@ export interface CustomHttpResponse {
   text: string;
 }
 
+export interface CustomHttpStreamResponse {
+  status: number;
+  text: string;
+  byteLength: number;
+  chunkCount: number;
+}
+
 export interface CustomHttpStreamEvent {
   streamId: string;
   kind: 'status' | 'chunk' | 'done' | 'error';
@@ -268,7 +275,7 @@ export async function customHttpStreamRequest(
     onDone?: (status?: number | null) => void;
     onError?: (message: string, status?: number | null) => void;
   }
-): Promise<number> {
+): Promise<CustomHttpStreamResponse> {
   if (!isTauri()) {
     throw new Error('当前不是 Tauri 容器环境，请使用 `npm run tauri dev` 启动');
   }
@@ -296,7 +303,9 @@ export async function customHttpStreamRequest(
   });
 
   try {
-    return await invoke<number>('custom_http_stream_request', { request, streamId });
+    const response = await invoke<CustomHttpStreamResponse>('custom_http_stream_request', { request, streamId });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return response;
   } finally {
     unlisten();
   }
