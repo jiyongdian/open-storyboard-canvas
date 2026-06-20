@@ -10,7 +10,7 @@ import { useSettingsStore } from '@/stores/settingsStore';
 import { normalizeVideoInputSchema } from '../application/videoInputSchema';
 
 import type { AiGateway, GenerateImagePayload } from '../application/ports';
-import { submitDreaminaJob, getDreaminaJob } from './dreaminaGateway';
+import { submitDreaminaJob, submitDreaminaVideoJob, getDreaminaJob } from './dreaminaGateway';
 import {
   submitCustomProviderJob,
   getCustomProviderJob,
@@ -42,7 +42,7 @@ export interface GenerateImageDebugPreview {
 }
 
 export interface GenerateVideoDebugPreview {
-  route: 'custom' | 'agnes';
+  route: 'custom' | 'agnes' | 'dreamina';
   gatewayRequest: {
     prompt: string;
     model: string;
@@ -170,8 +170,8 @@ export async function buildGenerateImageDebugPreview(
 export async function buildGenerateVideoDebugPreview(
   payload: GenerateVideoPayload,
 ): Promise<GenerateVideoDebugPreview> {
-  if (!isCustomModel(payload.model) && !isAgnesModel(payload.model)) {
-    throw new Error('视频生成当前仅支持自定义视频服务商配置');
+  if (!isCustomModel(payload.model) && !isAgnesModel(payload.model) && !isDreaminaModel(payload.model)) {
+    throw new Error('视频生成当前仅支持自定义视频服务商配置或即梦 CLI');
   }
   const normalizedReferenceImages = await normalizeVideoReferenceImages(payload);
   const request = {
@@ -187,7 +187,7 @@ export async function buildGenerateVideoDebugPreview(
       ...(typeof payload.seconds === 'number' ? { seconds: payload.seconds } : {}),
     },
   };
-  const route = isAgnesModel(payload.model) ? 'agnes' : 'custom';
+  const route = isDreaminaModel(payload.model) ? 'dreamina' : (isAgnesModel(payload.model) ? 'agnes' : 'custom');
   return {
     route,
     gatewayRequest: {
@@ -200,7 +200,9 @@ export async function buildGenerateVideoDebugPreview(
       referenceAudios: payload.referenceAudios,
       extraParams: summarizeDebugValue(request.extra_params),
     },
-    providerRequest: buildCustomVideoProviderRequestDebugPreview(request),
+    providerRequest: route === 'dreamina'
+      ? undefined
+      : buildCustomVideoProviderRequestDebugPreview(request),
   };
 }
 
@@ -241,10 +243,16 @@ export const tauriAiGateway: AiGateway = {
     return await getGenerateImageJob(jobId);
   },
   submitGenerateVideoJob: async (payload: GenerateVideoPayload) => {
-    if (!isCustomModel(payload.model) && !isAgnesModel(payload.model)) {
-      throw new Error('视频生成当前仅支持自定义视频服务商配置');
+    if (!isCustomModel(payload.model) && !isAgnesModel(payload.model) && !isDreaminaModel(payload.model)) {
+      throw new Error('视频生成当前仅支持自定义视频服务商配置或即梦 CLI');
     }
     const normalizedReferenceImages = await normalizeVideoReferenceImages(payload);
+    if (isDreaminaModel(payload.model)) {
+      return await submitDreaminaVideoJob({
+        ...payload,
+        referenceImages: normalizedReferenceImages,
+      });
+    }
     return await submitCustomVideoJob({
       prompt: payload.prompt,
       model: payload.model,
@@ -260,6 +268,7 @@ export const tauriAiGateway: AiGateway = {
     });
   },
   getGenerateVideoJob: async (jobId: string) => {
+    if (isDreaminaJob(jobId)) return getDreaminaJob(jobId);
     if (isCustomJob(jobId)) return getCustomProviderJob(jobId);
     return { job_id: jobId, status: 'not_found', result: null, error: 'video job id not found' };
   },

@@ -647,7 +647,8 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
     const latestSettings = useSettingsStore.getState();
     const latestCatalog = buildVideoModelCatalog(
       useCustomProvidersStore.getState().providers,
-      latestSettings.agnesApiKey
+      latestSettings.agnesApiKey,
+      latestSettings.dreaminaStatus
     );
     const latestModelConfig = resolveVideoModelConfig(latestCatalog, latestData.modelConfig ?? resolvedModelConfig);
     const latestEntry = resolveConfigEntry(latestCatalog, latestModelConfig);
@@ -1091,7 +1092,7 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
         duration: defaultDurationForVideoEntry(entry),
         resolution: entry.supportedResolutions[0] ?? '1280x720',
         aspectRatio: entry.supportedAspectRatios[0] ?? '16:9',
-        extraParams: {},
+        extraParams: { ...(entry.defaultExtraParams ?? {}) },
       },
     });
     setProviderOpen(false);
@@ -1111,7 +1112,7 @@ export const AiVideoNode = memo(({ id, data, selected, width, height }: AiVideoN
         aspectRatio: resolvedModelConfig?.aspectRatio && entry.supportedAspectRatios.includes(resolvedModelConfig.aspectRatio)
           ? resolvedModelConfig.aspectRatio
           : entry.supportedAspectRatios[0] ?? '16:9',
-        extraParams: {},
+        extraParams: { ...(entry.defaultExtraParams ?? {}) },
       },
     });
     setModelOpen(false);

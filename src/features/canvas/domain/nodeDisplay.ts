@@ -6,7 +6,7 @@ import {
 } from './canvasNodes';
 
 export const DEFAULT_NODE_DISPLAY_NAME: Record<CanvasNodeType, string> = {
-  [CANVAS_NODE_TYPES.upload]: '上传图片',
+  [CANVAS_NODE_TYPES.upload]: '上传素材',
   [CANVAS_NODE_TYPES.imageEdit]: 'AI 图片',
   [CANVAS_NODE_TYPES.aiVideo]: 'AI 视频',
   [CANVAS_NODE_TYPES.aiText]: 'AI 文本',
@@ -47,6 +47,9 @@ export function resolveNodeDisplayName(type: CanvasNodeType, data: Partial<Canva
   if (type === CANVAS_NODE_TYPES.blueprint && customTitle === '蓝图') {
     return getDefaultNodeDisplayName(type, data);
   }
+  if (type === CANVAS_NODE_TYPES.upload && customTitle === '上传图片') {
+    return getDefaultNodeDisplayName(type, data);
+  }
   if (customTitle) {
     return customTitle;
   }
@@ -69,6 +72,9 @@ export function isNodeUsingDefaultDisplayName(type: CanvasNodeType, data: Partia
     return true;
   }
   if (type === CANVAS_NODE_TYPES.blueprint && customTitle === '蓝图') {
+    return true;
+  }
+  if (type === CANVAS_NODE_TYPES.upload && customTitle === '上传图片') {
     return true;
   }
   return customTitle === getDefaultNodeDisplayName(type, data);

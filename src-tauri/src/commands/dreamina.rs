@@ -357,12 +357,11 @@ pub async fn check_dreamina_login() -> DreaminaStatus {
 }
 
 // ============================================================================
-// Generation commands — thin shell wrappers around `dreamina text2image` and
-// `dreamina image2image`. They submit synchronously (with --poll so we block
-// until the job resolves or 60s passes) and return the raw JSON/text from
-// stdout, which the frontend parses to pull out the submit_id / result URLs.
-// The CLI handles auth via the local login session that check_dreamina_login
-// already validated.
+// Generation commands — thin shell wrappers around Dreamina CLI media
+// commands. They submit synchronously (with --poll so we block until the job
+// resolves or N seconds passes) and return raw JSON/text from stdout, which the
+// frontend parses to pull out the submit_id / result URLs. The CLI handles auth
+// via the local login session that check_dreamina_login already validated.
 // ============================================================================
 
 #[derive(Debug, Serialize)]
@@ -555,6 +554,212 @@ pub async fn dreamina_image_upscale(
     run_dreamina_subcommand(args).await
 }
 
+#[tauri::command]
+pub async fn dreamina_text2video(
+    prompt: String,
+    model_version: Option<String>,
+    ratio: Option<String>,
+    duration: Option<u32>,
+    video_resolution: Option<String>,
+    poll_seconds: Option<u32>,
+) -> DreaminaSubmitResult {
+    let mut args: Vec<String> = vec!["text2video".into(), format!("--prompt={prompt}")];
+    if let Some(m) = model_version {
+        args.push(format!("--model_version={m}"));
+    }
+    if let Some(r) = ratio.filter(|s| s != "auto") {
+        args.push(format!("--ratio={r}"));
+    }
+    if let Some(d) = duration {
+        args.push(format!("--duration={d}"));
+    }
+    if let Some(vr) = video_resolution {
+        args.push(format!("--video_resolution={vr}"));
+    }
+    args.push(format!("--poll={}", poll_seconds.unwrap_or(180)));
+    run_dreamina_subcommand(args).await
+}
+
+#[tauri::command]
+pub async fn dreamina_image2video(
+    prompt: String,
+    image_path: String,
+    model_version: Option<String>,
+    duration: Option<u32>,
+    video_resolution: Option<String>,
+    poll_seconds: Option<u32>,
+) -> DreaminaSubmitResult {
+    if image_path.trim().is_empty() {
+        return DreaminaSubmitResult {
+            ok: false,
+            submit_id: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some("图生视频需要一张首帧图片".into()),
+        };
+    }
+    let mut args: Vec<String> = vec![
+        "image2video".into(),
+        format!("--image={image_path}"),
+        format!("--prompt={prompt}"),
+    ];
+    if let Some(m) = model_version {
+        args.push(format!("--model_version={m}"));
+    }
+    if let Some(d) = duration {
+        args.push(format!("--duration={d}"));
+    }
+    if let Some(vr) = video_resolution {
+        args.push(format!("--video_resolution={vr}"));
+    }
+    args.push(format!("--poll={}", poll_seconds.unwrap_or(180)));
+    run_dreamina_subcommand(args).await
+}
+
+#[tauri::command]
+pub async fn dreamina_frames2video(
+    prompt: String,
+    first_path: String,
+    last_path: String,
+    model_version: Option<String>,
+    duration: Option<u32>,
+    video_resolution: Option<String>,
+    poll_seconds: Option<u32>,
+) -> DreaminaSubmitResult {
+    if first_path.trim().is_empty() || last_path.trim().is_empty() {
+        return DreaminaSubmitResult {
+            ok: false,
+            submit_id: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some("首尾帧成片需要第一帧和最后一帧两张图片".into()),
+        };
+    }
+    let mut args: Vec<String> = vec![
+        "frames2video".into(),
+        format!("--first={first_path}"),
+        format!("--last={last_path}"),
+        format!("--prompt={prompt}"),
+    ];
+    if let Some(m) = model_version {
+        args.push(format!("--model_version={m}"));
+    }
+    if let Some(d) = duration {
+        args.push(format!("--duration={d}"));
+    }
+    if let Some(vr) = video_resolution {
+        args.push(format!("--video_resolution={vr}"));
+    }
+    args.push(format!("--poll={}", poll_seconds.unwrap_or(180)));
+    run_dreamina_subcommand(args).await
+}
+
+#[tauri::command]
+pub async fn dreamina_multiframe2video(
+    image_paths: Vec<String>,
+    prompt: Option<String>,
+    duration: Option<f64>,
+    transition_prompts: Option<Vec<String>>,
+    transition_durations: Option<Vec<String>>,
+    poll_seconds: Option<u32>,
+) -> DreaminaSubmitResult {
+    let clean_paths: Vec<String> = image_paths
+        .into_iter()
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .collect();
+    if clean_paths.len() < 2 {
+        return DreaminaSubmitResult {
+            ok: false,
+            submit_id: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some("多帧成片至少需要 2 张图片".into()),
+        };
+    }
+
+    let mut args: Vec<String> = vec![
+        "multiframe2video".into(),
+        format!("--images={}", clean_paths.join(",")),
+    ];
+    if clean_paths.len() == 2 {
+        if let Some(p) = prompt.filter(|value| !value.trim().is_empty()) {
+            args.push(format!("--prompt={p}"));
+        }
+        if let Some(d) = duration {
+            args.push(format!("--duration={d}"));
+        }
+    } else {
+        let transitions = transition_prompts.unwrap_or_default();
+        for item in transitions {
+            if !item.trim().is_empty() {
+                args.push(format!("--transition-prompt={}", item.trim()));
+            }
+        }
+        for item in transition_durations.unwrap_or_default() {
+            if !item.trim().is_empty() {
+                args.push(format!("--transition-duration={}", item.trim()));
+            }
+        }
+    }
+    args.push(format!("--poll={}", poll_seconds.unwrap_or(240)));
+    run_dreamina_subcommand(args).await
+}
+
+#[tauri::command]
+pub async fn dreamina_multimodal2video(
+    prompt: String,
+    image_paths: Vec<String>,
+    video_paths: Vec<String>,
+    audio_paths: Vec<String>,
+    model_version: Option<String>,
+    ratio: Option<String>,
+    duration: Option<u32>,
+    video_resolution: Option<String>,
+    poll_seconds: Option<u32>,
+) -> DreaminaSubmitResult {
+    let clean_images: Vec<String> = image_paths.into_iter().filter(|p| !p.trim().is_empty()).collect();
+    let clean_videos: Vec<String> = video_paths.into_iter().filter(|p| !p.trim().is_empty()).collect();
+    let clean_audios: Vec<String> = audio_paths.into_iter().filter(|p| !p.trim().is_empty()).collect();
+    if clean_images.is_empty() && clean_videos.is_empty() {
+        return DreaminaSubmitResult {
+            ok: false,
+            submit_id: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            error: Some("全能参考成片至少需要 1 张图片或 1 个视频参考".into()),
+        };
+    }
+
+    let mut args: Vec<String> = vec!["multimodal2video".into()];
+    if !prompt.trim().is_empty() {
+        args.push(format!("--prompt={prompt}"));
+    }
+    for path in clean_images {
+        args.push(format!("--image={}", path.trim()));
+    }
+    for path in clean_videos {
+        args.push(format!("--video={}", path.trim()));
+    }
+    for path in clean_audios {
+        args.push(format!("--audio={}", path.trim()));
+    }
+    if let Some(m) = model_version {
+        args.push(format!("--model_version={m}"));
+    }
+    if let Some(r) = ratio.filter(|s| s != "auto") {
+        args.push(format!("--ratio={r}"));
+    }
+    if let Some(d) = duration {
+        args.push(format!("--duration={d}"));
+    }
+    if let Some(vr) = video_resolution {
+        args.push(format!("--video_resolution={vr}"));
+    }
+    args.push(format!("--poll={}", poll_seconds.unwrap_or(240)));
+    run_dreamina_subcommand(args).await
+}
+
 /// Stage a data: URL as a temp file so Dreamina CLI (which only accepts local
 /// paths via `--images`) can read it. Returns the absolute file path.
 #[tauri::command]
@@ -580,6 +785,45 @@ pub async fn dreamina_stage_reference_image(data_url: String) -> Result<String, 
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let file = dir.join(format!("ref-{ts}.png"));
+    fs::write(&file, &bytes).map_err(|e| format!("write failed: {e}"))?;
+    Ok(file.to_string_lossy().to_string())
+}
+
+/// Stage a non-image data URL as a temp file so Dreamina CLI can upload it as
+/// video/audio reference input. The caller supplies a conservative extension
+/// inferred from the data URL MIME type.
+#[tauri::command]
+pub async fn dreamina_stage_reference_media(
+    data_url: String,
+    extension: Option<String>,
+) -> Result<String, String> {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    if !data_url.starts_with("data:") {
+        return Err("not a data URL".into());
+    }
+    let comma = data_url
+        .find(',')
+        .ok_or_else(|| "invalid data URL".to_string())?;
+    let payload = &data_url[comma + 1..];
+    let bytes = base64_decode(payload).map_err(|e| format!("base64 decode failed: {e}"))?;
+    let safe_ext = extension
+        .as_deref()
+        .unwrap_or("bin")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .take(8)
+        .collect::<String>();
+    let resolved_ext = if safe_ext.is_empty() { "bin".to_string() } else { safe_ext };
+
+    let dir = dreamina_staging_dir().ok_or_else(|| "HOME not set".to_string())?;
+    fs::create_dir_all(&dir).map_err(|e| format!("mkdir failed: {e}"))?;
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let file = dir.join(format!("ref-{ts}.{resolved_ext}"));
     fs::write(&file, &bytes).map_err(|e| format!("write failed: {e}"))?;
     Ok(file.to_string_lossy().to_string())
 }

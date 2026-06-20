@@ -43,7 +43,7 @@ export interface CatalogEntry {
   /** Dreamina resolution_type choices per sub-command. Surfaced in
    *  ModelConfigPicker "参数" popover so the user can pick 1k/2k/4k/8k. */
   supportedResolutions?: string[];
-  /** Dreamina model_version choices (3.0 / 4.0 / 5.0 / lab). For custom
+  /** Dreamina model_version choices (3.0 / 4.0 / 5.0). For custom
    *  providers this is populated from the user-configured list. */
   supportedModelVersions?: string[];
 }
@@ -124,17 +124,17 @@ export function buildImageModelCatalog({
   // semantics (no prompt, just HD upscale) are different from generation.
   if (dreaminaStatus?.loggedIn) {
     const R_EARLY = ['1k', '2k']; // 3.0 / 3.1
-    const R_MID = ['2k', '4k'];   // 4.x / 5.0 / lab
+    const R_MID = ['2k', '4k'];   // 4.x / 5.0
     const RATIOS_STD = ['auto', '16:9', '9:16', '1:1', '4:3', '3:4', '21:9'];
     const versions: Array<{ id: string; label: string; ratios: string[]; resolutions: string[]; note?: string }> = [
-      { id: '5.0',  label: '即梦 · 5.0（最新）',        ratios: RATIOS_STD, resolutions: R_MID },
-      { id: '4.6',  label: '即梦 · 4.6',               ratios: RATIOS_STD, resolutions: R_MID },
-      { id: '4.5',  label: '即梦 · 4.5',               ratios: RATIOS_STD, resolutions: R_MID },
-      { id: '4.1',  label: '即梦 · 4.1',               ratios: RATIOS_STD, resolutions: R_MID },
-      { id: '4.0',  label: '即梦 · 4.0',               ratios: RATIOS_STD, resolutions: R_MID },
+      { id: '5.0',  label: '即梦 · 5.0（文生图 / 图生图）', ratios: RATIOS_STD, resolutions: R_MID },
+      { id: '4.7',  label: '即梦 · 4.7（文生图 / 图生图）', ratios: RATIOS_STD, resolutions: R_MID },
+      { id: '4.6',  label: '即梦 · 4.6（文生图 / 图生图）', ratios: RATIOS_STD, resolutions: R_MID },
+      { id: '4.5',  label: '即梦 · 4.5（文生图 / 图生图）', ratios: RATIOS_STD, resolutions: R_MID },
+      { id: '4.1',  label: '即梦 · 4.1（文生图 / 图生图）', ratios: RATIOS_STD, resolutions: R_MID },
+      { id: '4.0',  label: '即梦 · 4.0（文生图 / 图生图）', ratios: RATIOS_STD, resolutions: R_MID },
       { id: '3.1',  label: '即梦 · 3.1（仅文生图）',    ratios: RATIOS_STD, resolutions: R_EARLY, note: 'only-text2image' },
       { id: '3.0',  label: '即梦 · 3.0（仅文生图）',    ratios: RATIOS_STD, resolutions: R_EARLY, note: 'only-text2image' },
-      { id: 'lab',  label: '即梦 · lab（VIP）',         ratios: RATIOS_STD, resolutions: R_MID },
     ];
     for (const v of versions) {
       entries.push({

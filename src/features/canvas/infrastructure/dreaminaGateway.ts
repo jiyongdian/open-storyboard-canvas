@@ -1,6 +1,8 @@
 import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 
 import type { GenerateRequest, GenerationJobStatus } from '@/commands/ai';
+import { loadAudioSourceDataUrl, persistVideoSource } from '@/commands/image';
+import type { GenerateVideoPayload } from '../application/ports';
 
 /**
  * Dreamina CLI image gateway (frontend side).
@@ -72,19 +74,23 @@ function humanizeDreaminaFailReason(reason: string | undefined | null): string {
   return `即梦服务端返回失败：${reason.slice(0, 200)}`;
 }
 
-/** Parse the first usable image URL / local path from the CLI's combined output. */
-function extractResultUrl(raw: string): string | null {
+/** Parse the first usable image/video URL / local path from the CLI's combined output. */
+function extractResultUrl(raw: string, media: 'image' | 'video' = 'image'): string | null {
+  const ext = media === 'video'
+    ? '(?:mp4|mov|webm|m4v)'
+    : '(?:png|jpg|jpeg|webp)';
   // Common output shapes from dreamina CLI include:
   //  - "image_url: https://.../foo.png"
+  //  - "video_url: https://.../foo.mp4"
   //  - JSON blobs with "image_url" / "url" / "local_path" fields
   //  - "downloaded to /Users/.../result-*.png"
   const patterns = [
-    /"image_url"\s*:\s*"([^"]+)"/,
-    /"url"\s*:\s*"(https?:\/\/[^"]+\.(?:png|jpg|jpeg|webp))"/i,
+    media === 'video' ? /"video_url"\s*:\s*"([^"]+)"/ : /"image_url"\s*:\s*"([^"]+)"/,
+    new RegExp(`"url"\\s*:\\s*"(https?:\\/\\/[^"]+\\.${ext})"`, 'i'),
     /"local_path"\s*:\s*"([^"]+)"/,
-    /image_url[=:]\s*(\S+)/,
-    /downloaded\s+to\s+(\S+\.(?:png|jpg|jpeg|webp))/i,
-    /(https?:\/\/\S+\.(?:png|jpg|jpeg|webp))/i,
+    media === 'video' ? /video_url[=:]\s*(\S+)/ : /image_url[=:]\s*(\S+)/,
+    new RegExp(`downloaded\\s+to\\s+(\\S+\\.${ext})`, 'i'),
+    new RegExp(`(https?:\\/\\/\\S+\\.${ext})`, 'i'),
   ];
   for (const p of patterns) {
     const m = raw.match(p);
@@ -124,6 +130,76 @@ function normalizeRatio(r: string | undefined): string | undefined {
   if (r === 'auto') return undefined;
   const allowed = ['21:9', '16:9', '3:2', '4:3', '1:1', '3:4', '2:3', '9:16'];
   return allowed.includes(r) ? r : undefined;
+}
+
+function normalizeVideoRatio(r: string | undefined): string | undefined {
+  if (!r || r === 'auto') return undefined;
+  const allowed = ['1:1', '3:4', '16:9', '4:3', '9:16', '21:9'];
+  return allowed.includes(r) ? r : undefined;
+}
+
+function inferExtensionFromDataUrl(dataUrl: string, fallback: string): string {
+  const match = dataUrl.match(/^data:([^;,]+)[;,]/i);
+  const mime = match?.[1]?.toLowerCase() ?? '';
+  if (mime.includes('mp4')) return 'mp4';
+  if (mime.includes('quicktime')) return 'mov';
+  if (mime.includes('webm')) return 'webm';
+  if (mime.includes('mpeg') || mime.includes('mp3')) return 'mp3';
+  if (mime.includes('wav')) return 'wav';
+  if (mime.includes('ogg')) return 'ogg';
+  if (mime.includes('aac')) return 'aac';
+  return fallback;
+}
+
+async function stashDataUrlToMediaFile(dataUrl: string, fallbackExtension: string): Promise<string> {
+  return await invoke<string>('dreamina_stage_reference_media', {
+    dataUrl,
+    extension: inferExtensionFromDataUrl(dataUrl, fallbackExtension),
+  });
+}
+
+async function stageVideoReference(src: string): Promise<string> {
+  if (src.startsWith('data:')) return await stashDataUrlToMediaFile(src, 'mp4');
+  return await persistVideoSource(src);
+}
+
+async function stageAudioReference(src: string): Promise<string> {
+  const dataUrl = src.startsWith('data:') ? src : await loadAudioSourceDataUrl(src);
+  return await stashDataUrlToMediaFile(dataUrl, 'mp3');
+}
+
+async function pollDreaminaResult(
+  jobId: string,
+  submitId: string,
+  media: 'image' | 'video',
+  timeoutMs: number,
+): Promise<string | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 3000));
+    const queried = await invoke<DreaminaBackendResult>('dreamina_query_result', {
+      submitId,
+      downloadDir: undefined,
+    });
+    const combined = `${queried.stdout}\n${queried.stderr}`;
+    if (!queried.ok) {
+      const lower = (queried.error ?? combined).toLowerCase();
+      const transient = lower.includes('running') || lower.includes('pending') || lower.includes('processing') || lower.includes('not finished');
+      if (transient) continue;
+    }
+    const resultUrl = extractResultUrl(combined, media);
+    if (resultUrl) return resultUrl;
+    if (!queried.ok && queried.error) {
+      resultCache.set(jobId, {
+        job_id: jobId,
+        status: 'failed',
+        result: null,
+        error: humanizeDreaminaFailReason(queried.error),
+      });
+      return null;
+    }
+  }
+  return null;
 }
 
 /**
@@ -223,7 +299,7 @@ export async function submitDreaminaJob(request: GenerateRequest): Promise<strin
       return jobId;
     }
     // Fast path: if the submit already printed a URL or local path, use it.
-    let resultUrl = extractResultUrl(backend.stdout) ?? extractResultUrl(backend.stderr);
+    let resultUrl = extractResultUrl(backend.stdout, 'image') ?? extractResultUrl(backend.stderr, 'image');
     const submitId = backend.submitId ?? extractSubmitIdFallback(backend.stdout + backend.stderr);
 
     // Slow path: the CLI's submit step frequently returns only a submit_id
@@ -293,4 +369,146 @@ export function getDreaminaJob(jobId: string): GenerationJobStatus {
   const cached = resultCache.get(jobId);
   if (!cached) return { job_id: jobId, status: 'not_found', result: null, error: 'job id not found' };
   return cached;
+}
+
+export async function submitDreaminaVideoJob(payload: GenerateVideoPayload): Promise<string> {
+  const modelPart = payload.model.split(':')[1] ?? 'text-video';
+  const refs = payload.referenceImages ?? [];
+  const referenceVideos = payload.referenceVideos ?? [];
+  const referenceAudios = payload.referenceAudios ?? [];
+  const extra = payload.extraParams ?? {};
+  const duration = typeof payload.seconds === 'number' && Number.isFinite(payload.seconds)
+    ? Math.round(payload.seconds)
+    : undefined;
+  const resolution = payload.size && payload.size !== 'auto'
+    ? payload.size
+    : (typeof extra.videoResolution === 'string' ? extra.videoResolution : undefined);
+  const modelVersion = typeof extra.modelVersion === 'string' ? extra.modelVersion : undefined;
+  const ratio = normalizeVideoRatio(payload.aspectRatio);
+  const jobId = `dreamina-video-local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  resultCache.set(jobId, { job_id: jobId, status: 'running', result: null, error: null });
+
+  try {
+    let backend: DreaminaBackendResult;
+    if (modelPart === 'image-video') {
+      if (refs.length < 1) {
+        resultCache.set(jobId, { job_id: jobId, status: 'failed', result: null, error: '图生视频需要 1 张首帧图片' });
+        return jobId;
+      }
+      const imagePath = await stashRemoteOrDataUrlToTempFile(refs[0], 0);
+      backend = await invokeDreaminaSubmitWithRetry('dreamina_image2video', {
+        prompt: payload.prompt,
+        imagePath,
+        modelVersion,
+        duration,
+        videoResolution: resolution,
+        pollSeconds: 180,
+      });
+    } else if (modelPart === 'frames-video') {
+      if (refs.length < 2) {
+        resultCache.set(jobId, { job_id: jobId, status: 'failed', result: null, error: '首尾帧成片需要 2 张图片' });
+        return jobId;
+      }
+      const firstPath = await stashRemoteOrDataUrlToTempFile(refs[0], 0);
+      const lastPath = await stashRemoteOrDataUrlToTempFile(refs[1], 1);
+      backend = await invokeDreaminaSubmitWithRetry('dreamina_frames2video', {
+        prompt: payload.prompt,
+        firstPath,
+        lastPath,
+        modelVersion,
+        duration,
+        videoResolution: resolution,
+        pollSeconds: 180,
+      });
+    } else if (modelPart === 'multi-frame-video') {
+      if (refs.length < 2) {
+        resultCache.set(jobId, { job_id: jobId, status: 'failed', result: null, error: '多帧成片至少需要 2 张图片' });
+        return jobId;
+      }
+      const imagePaths: string[] = [];
+      for (let i = 0; i < refs.length; i++) {
+        imagePaths.push(await stashRemoteOrDataUrlToTempFile(refs[i], i));
+      }
+      const transitionCount = Math.max(0, imagePaths.length - 1);
+      const segmentDuration = typeof payload.seconds === 'number' && transitionCount > 0
+        ? Math.max(0.5, Math.min(8, payload.seconds / transitionCount))
+        : undefined;
+      backend = await invokeDreaminaSubmitWithRetry('dreamina_multiframe2video', {
+        imagePaths,
+        prompt: payload.prompt,
+        duration: segmentDuration,
+        transitionPrompts: imagePaths.length > 2
+          ? Array.from({ length: transitionCount }, () => payload.prompt)
+          : undefined,
+        transitionDurations: imagePaths.length > 2 && segmentDuration
+          ? Array.from({ length: transitionCount }, () => String(segmentDuration))
+          : undefined,
+        pollSeconds: 240,
+      });
+    } else if (modelPart === 'all-reference-video') {
+      const imagePaths: string[] = [];
+      for (let i = 0; i < refs.length; i++) {
+        imagePaths.push(await stashRemoteOrDataUrlToTempFile(refs[i], i));
+      }
+      const videoPaths: string[] = [];
+      for (const src of referenceVideos.slice(0, 3)) {
+        videoPaths.push(await stageVideoReference(src));
+      }
+      const audioPaths: string[] = [];
+      for (const src of referenceAudios.slice(0, 3)) {
+        audioPaths.push(await stageAudioReference(src));
+      }
+      backend = await invokeDreaminaSubmitWithRetry('dreamina_multimodal2video', {
+        prompt: payload.prompt,
+        imagePaths,
+        videoPaths,
+        audioPaths,
+        modelVersion,
+        ratio,
+        duration,
+        videoResolution: resolution,
+        pollSeconds: 240,
+      });
+    } else {
+      backend = await invokeDreaminaSubmitWithRetry('dreamina_text2video', {
+        prompt: payload.prompt,
+        modelVersion,
+        ratio,
+        duration,
+        videoResolution: resolution,
+        pollSeconds: 180,
+      });
+    }
+
+    if (!backend.ok) {
+      resultCache.set(jobId, { job_id: jobId, status: 'failed', result: null, error: humanizeDreaminaFailReason(backend.error ?? '即梦 CLI 执行失败') });
+      return jobId;
+    }
+
+    const combined = `${backend.stdout}\n${backend.stderr}`;
+    let resultUrl = extractResultUrl(combined, 'video');
+    const submitId = backend.submitId ?? extractSubmitIdFallback(combined);
+    if (!resultUrl && submitId) {
+      resultUrl = await pollDreaminaResult(jobId, submitId, 'video', 8 * 60 * 1000);
+    }
+    if (!resultUrl) {
+      resultCache.set(jobId, {
+        job_id: jobId,
+        status: 'failed',
+        result: null,
+        error: '即梦视频任务超过 8 分钟未返回结果，请稍后在设置中检查登录状态或查看 CLI 日志。',
+      });
+      return jobId;
+    }
+    resultCache.set(jobId, { job_id: jobId, status: 'succeeded', result: rewrapLocalPath(resultUrl), error: null });
+    return jobId;
+  } catch (err) {
+    resultCache.set(jobId, {
+      job_id: jobId,
+      status: 'failed',
+      result: null,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return jobId;
+  }
 }

@@ -258,7 +258,8 @@ fn build_http_request(
                 continue;
             }
             if (body_mode == "multipart" || body_mode == "form-urlencoded")
-                && key.eq_ignore_ascii_case("content-type")
+                && (key.eq_ignore_ascii_case("content-type")
+                    || key.eq_ignore_ascii_case("content-length"))
             {
                 continue;
             }

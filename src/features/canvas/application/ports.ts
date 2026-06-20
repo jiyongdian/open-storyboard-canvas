@@ -107,7 +107,7 @@ export interface CanvasEventMap {
   'upload-node/reupload': {
     nodeId: string;
   };
-  'upload-node/paste-image': {
+  'upload-node/paste-material': {
     nodeId: string;
     file: File;
   };

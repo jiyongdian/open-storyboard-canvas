@@ -1232,7 +1232,10 @@ function buildRequestHeaders(
   Object.entries(cfg.extraHeaders ?? {}).forEach(([key, value]) => {
     const normalizedKey = key.trim();
     if (!normalizedKey) return;
-    if ((bodyMode === 'multipart' || bodyMode === 'form-urlencoded') && /^content-type$/i.test(normalizedKey)) return;
+    if (
+      (bodyMode === 'multipart' || bodyMode === 'form-urlencoded')
+      && /^(content-type|content-length)$/i.test(normalizedKey)
+    ) return;
     headers[normalizedKey] = value;
   });
 
@@ -3259,6 +3262,7 @@ async function pollGeneratedVideoTask(
   const startedAt = Date.now();
   let pollCount = 0;
   let consecutiveNetworkFailures = 0;
+  let lastSuccessWithoutVideo: string | null = null;
 
   while (Date.now() - startedAt < timeoutMs) {
     if (pollCount > 0) {
@@ -3316,7 +3320,8 @@ async function pollGeneratedVideoTask(
       if (providerKind === 'openai-videos' || providerKind === 'openai-video-compatible') {
         return buildOpenAiVideoContentUrl(cfg, taskId);
       }
-      throw new Error(`视频任务状态为 ${status}，但未按 responseVideoPath/videoUrlPath 找到视频 URL。请检查响应路径配置。`);
+      lastSuccessWithoutVideo = status;
+      continue;
     }
     if (status && !pendingValues.includes(status)) {
       console.warn('[CustomProvider] unrecognized video status, keep polling', { status, taskId });
@@ -3324,7 +3329,9 @@ async function pollGeneratedVideoTask(
   }
 
   throw new VideoPollTimeoutError(
-    '视频任务轮询超时，未获取到结果',
+    lastSuccessWithoutVideo
+      ? `视频任务状态为 ${lastSuccessWithoutVideo}，但超时前仍未按 responseVideoPath/videoUrlPath 找到视频 URL。请检查响应路径配置，或把轮询超时调大。`
+      : '视频任务轮询超时，未获取到结果',
     { cfg, taskId },
   );
 }
@@ -3620,6 +3627,7 @@ async function pollAsyncTaskResult(
   const startedAt = Date.now();
   let pollCount = 0;
   let consecutiveNetworkFailures = 0;
+  let lastSuccessWithoutImage: string | null = null;
   while (Date.now() - startedAt < config.timeoutMs) {
     if (pollCount > 0) {
       await sleep(config.intervalMs);
@@ -3670,8 +3678,12 @@ async function pollAsyncTaskResult(
       throw new Error(formatAsyncErrorValue(messageRaw) ?? `任务失败：${status}`);
     }
     if (status && config.successValues.includes(status)) {
-      throw new Error(`任务状态为 ${status}，但未按 imagePath/responseImagePath 找到图片 URL。请检查响应路径配置。`);
+      lastSuccessWithoutImage = status;
+      continue;
     }
+  }
+  if (lastSuccessWithoutImage) {
+    throw new Error(`任务状态为 ${lastSuccessWithoutImage}，但超时前仍未按 imagePath/responseImagePath 找到图片 URL。请检查响应路径配置，或把轮询超时调大。`);
   }
   throw new Error('任务轮询超时，未获取到图片');
 }

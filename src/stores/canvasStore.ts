@@ -150,6 +150,12 @@ interface CanvasState {
   ) => string;
   addEdge: (source: string, target: string) => string | null;
   findNodePosition: (sourceNodeId: string, newNodeWidth: number, newNodeHeight: number) => { x: number; y: number };
+  findNodePositions: (
+    sourceNodeId: string,
+    count: number,
+    newNodeWidth: number,
+    newNodeHeight: number
+  ) => { x: number; y: number }[];
   addDerivedUploadNode: (
     sourceNodeId: string,
     imageUrl: string,
@@ -178,6 +184,11 @@ interface CanvasState {
   ) => string | null;
 
   updateNodeData: (nodeId: string, data: Partial<CanvasNodeData>) => void;
+  replaceNodeType: (
+    nodeId: string,
+    type: CanvasNodeType,
+    data?: Partial<CanvasNodeData>
+  ) => boolean;
   updateDirectorStudioProjectLibrary: (
     projects: DirectorStudioProjectRecord[],
     sourceNodeId?: string,
@@ -1364,9 +1375,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
       }
     }
 
-    // If ring sampling misses an available slot in current viewport,
-    // run a denser viewport sweep before falling back outside view.
-    if (!bestInView && visibleBounds) {
+    // If the local rings found a nearby out-of-view slot, prefer that over
+    // jumping to an unrelated visible corner. This keeps repeated batch
+    // generations clustered around their source node.
+    if (!bestInView && !bestOutOfView && visibleBounds) {
       const padding = 8;
       const minX = visibleBounds.minX + padding;
       const maxX = visibleBounds.maxX - newNodeWidth - padding;
@@ -1399,6 +1411,92 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     }
 
     return { x: anchorX + 2 * stepX, y: anchorY };
+  },
+
+  findNodePositions: (sourceNodeId, count, newNodeWidth, newNodeHeight) => {
+    const state = get();
+    const sourceNode = state.nodes.find((n) => n.id === sourceNodeId);
+    const total = Math.max(0, Math.floor(count));
+    if (!sourceNode || total === 0) {
+      return [];
+    }
+
+    const sourceWidth = sourceNode.measured?.width ?? DEFAULT_NODE_WIDTH;
+    const sourceHeight = sourceNode.measured?.height ?? 200;
+    const anchorX = sourceNode.position.x + sourceWidth + 28;
+    const anchorY = sourceNode.position.y;
+    const stepX = Math.max(newNodeWidth + 24, 140);
+    const stepY = Math.max(newNodeHeight + 24, Math.round(sourceHeight * 0.5), 120);
+    const margin = 8;
+    const reserved: { x: number; y: number; width: number; height: number }[] = [];
+
+    const collides = (x: number, y: number, width: number, height: number) => {
+      const overlaps = (
+        left: number,
+        top: number,
+        otherWidth: number,
+        otherHeight: number
+      ) => (
+        x < left + otherWidth + margin &&
+        x + width + margin > left &&
+        y < top + otherHeight + margin &&
+        y + height + margin > top
+      );
+
+      return state.nodes.some((node) => {
+        const nodeWidth = node.measured?.width ?? DEFAULT_NODE_WIDTH;
+        const nodeHeight = node.measured?.height ?? 200;
+        return overlaps(node.position.x, node.position.y, nodeWidth, nodeHeight);
+      }) || reserved.some((node) => overlaps(node.x, node.y, node.width, node.height));
+    };
+
+    const rowOffsets: number[] = [];
+    const maxRows = Math.max(12, total + 8);
+    for (let row = 0; row <= maxRows; row += 1) {
+      rowOffsets.push(row);
+      if (row > 0 && row <= 3) {
+        rowOffsets.push(-row);
+      }
+    }
+
+    const positions: { x: number; y: number }[] = [];
+    for (let index = 0; index < total; index += 1) {
+      let nextPosition: { x: number; y: number } | null = null;
+
+      for (let column = 0; column <= 4 && !nextPosition; column += 1) {
+        for (const row of rowOffsets) {
+          const x = anchorX + column * stepX;
+          const y = anchorY + row * stepY;
+          if (!collides(x, y, newNodeWidth, newNodeHeight)) {
+            nextPosition = { x, y };
+            break;
+          }
+        }
+      }
+
+      if (!nextPosition) {
+        const fallback = state.findNodePosition(sourceNodeId, newNodeWidth, newNodeHeight);
+        nextPosition = {
+          x: fallback.x + index * stepX,
+          y: fallback.y,
+        };
+        while (collides(nextPosition.x, nextPosition.y, newNodeWidth, newNodeHeight)) {
+          nextPosition = {
+            x: nextPosition.x + stepX,
+            y: nextPosition.y,
+          };
+        }
+      }
+
+      positions.push(nextPosition);
+      reserved.push({
+        ...nextPosition,
+        width: newNodeWidth,
+        height: newNodeHeight,
+      });
+    }
+
+    return positions;
   },
 
   addDerivedUploadNode: (sourceNodeId, imageUrl, aspectRatio, previewImageUrl) => {
@@ -1769,6 +1867,45 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         dragHistorySnapshot: null,
       };
     });
+  },
+
+  replaceNodeType: (nodeId, type, data = {}) => {
+    let replaced = false;
+
+    set((state) => {
+      const existingNode = state.nodes.find((node) => node.id === nodeId);
+      if (!existingNode || existingNode.type === type) {
+        return {};
+      }
+
+      const replacement = canvasNodeFactory.createNode(type, existingNode.position, data);
+      const nextNode: CanvasNode = {
+        ...replacement,
+        id: existingNode.id,
+        position: existingNode.position,
+        selected: existingNode.selected,
+        parentId: existingNode.parentId,
+        extent: existingNode.extent,
+        expandParent: existingNode.expandParent,
+        zIndex: existingNode.zIndex,
+      };
+      const nextNodes = state.nodes.map((node) => (
+        node.id === nodeId ? nextNode : node
+      ));
+
+      replaced = true;
+      return {
+        nodes: nextNodes,
+        edges: normalizeEdgesWithNodes(state.edges, nextNodes),
+        history: {
+          past: pushSnapshot(state.history.past, createSnapshot(state.nodes, state.edges)),
+          future: [],
+        },
+        dragHistorySnapshot: null,
+      };
+    });
+
+    return replaced;
   },
 
   deleteNode: (nodeId) => {

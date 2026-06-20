@@ -58,7 +58,7 @@ export interface CanvasNodeDefinition<TData extends CanvasNodeData = CanvasNodeD
 
 const uploadNodeDefinition: CanvasNodeDefinition<UploadImageNodeData> = {
   type: CANVAS_NODE_TYPES.upload,
-  menuLabelKey: 'node.menu.uploadImage',
+  menuLabelKey: 'node.menu.uploadMaterial',
   menuIcon: 'upload',
   visibleInMenu: true,
   capabilities: {
@@ -256,7 +256,7 @@ const videoNodeDefinition: CanvasNodeDefinition<VideoNodeData> = {
   type: CANVAS_NODE_TYPES.video,
   menuLabelKey: 'node.menu.uploadVideo',
   menuIcon: 'video',
-  visibleInMenu: true,
+  visibleInMenu: false,
   defaultSize: {
     width: 384,
     height: 288,
@@ -298,7 +298,7 @@ const audioNodeDefinition: CanvasNodeDefinition<AudioNodeData> = {
   type: CANVAS_NODE_TYPES.audio,
   menuLabelKey: 'node.menu.audio',
   menuIcon: 'audio',
-  visibleInMenu: true,
+  visibleInMenu: false,
   defaultSize: {
     width: 360,
     height: 160,

@@ -16,13 +16,14 @@ import {
   useViewport,
   type NodeProps,
 } from '@xyflow/react';
-import { RefreshCw, Upload } from 'lucide-react';
+import { AlertTriangle, Loader2, RefreshCw, Upload } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import {
   CANVAS_NODE_TYPES,
   EXPORT_RESULT_NODE_MIN_HEIGHT,
   EXPORT_RESULT_NODE_MIN_WIDTH,
+  type CanvasNodeData,
   type UploadImageNodeData,
 } from '@/features/canvas/domain/canvasNodes';
 import {
@@ -42,9 +43,12 @@ import {
   shouldUseOriginalImageByZoom,
 } from '@/features/canvas/application/imageData';
 import {
-  isImageFile,
-  resolveDroppedImageFile,
+  inferMaterialFileKind,
+  isMaterialFile,
+  resolveDroppedMaterialFile,
 } from '@/features/canvas/application/imageDragDrop';
+import { prepareVideoNodeDataFromFile } from '@/features/canvas/application/videoUpload';
+import { prepareAudioNodeDataFromFile } from '@/features/canvas/application/audioUpload';
 import { CanvasNodeImage } from '@/features/canvas/ui/CanvasNodeImage';
 import { useCanvasStore } from '@/stores/canvasStore';
 import { useSettingsStore } from '@/stores/settingsStore';
@@ -67,6 +71,7 @@ export const UploadNode = memo(({ id, data, selected, width, height }: UploadNod
   const updateNodeInternals = useUpdateNodeInternals();
   const setSelectedNode = useCanvasStore((state) => state.setSelectedNode);
   const updateNodeData = useCanvasStore((state) => state.updateNodeData);
+  const replaceNodeType = useCanvasStore((state) => state.replaceNodeType);
   const useUploadFilenameAsNodeTitle = useSettingsStore((state) => state.useUploadFilenameAsNodeTitle);
   const { zoom } = useViewport();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -80,6 +85,8 @@ export const UploadNode = memo(({ id, data, selected, width, height }: UploadNod
     stableLoaded: boolean;
   } | null>(null);
   const [transientPreviewUrl, setTransientPreviewUrl] = useState<string | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
   const resolvedAspectRatio = data.aspectRatio || '1:1';
   const compactSize = resolveMinEdgeFittedSize(resolvedAspectRatio, {
     minWidth: EXPORT_RESULT_NODE_MIN_WIDTH,
@@ -117,16 +124,66 @@ export const UploadNode = memo(({ id, data, selected, width, height }: UploadNod
 
   const processFile = useCallback(
     async (file: File) => {
+      if (!isMaterialFile(file)) {
+        return;
+      }
+
+      const selectedFile: File = file;
+      const materialKind = inferMaterialFileKind(selectedFile);
+      if (!materialKind) {
+        return;
+      }
+      setUploadError('');
+      setIsUploading(true);
+
+      if (materialKind === 'video' || materialKind === 'audio') {
+        clearTransientPreview();
+        try {
+          const prepared = materialKind === 'video'
+            ? await prepareVideoNodeDataFromFile(selectedFile)
+            : await prepareAudioNodeDataFromFile(selectedFile);
+          const nextData: Partial<CanvasNodeData> = {
+            ...prepared,
+          };
+          if (useUploadFilenameAsNodeTitle) {
+            nextData.displayName = selectedFile.name;
+          }
+          replaceNodeType(
+            id,
+            materialKind === 'video' ? CANVAS_NODE_TYPES.video : CANVAS_NODE_TYPES.audio,
+            nextData
+          );
+          setSelectedNode(id);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          setUploadError(message || t('node.upload.uploadFailed'));
+          console.error('[UploadNode] failed to import material', {
+            id,
+            fileName: selectedFile.name,
+            fileType: selectedFile.type,
+            error,
+          });
+        } finally {
+          setIsUploading(false);
+        }
+        return;
+      }
+
+      if (materialKind !== 'image') {
+        setIsUploading(false);
+        return;
+      }
+
       const sequence = uploadSequenceRef.current + 1;
       uploadSequenceRef.current = sequence;
       const started = performance.now();
       clearTransientPreview();
-      const optimisticPreviewUrl = URL.createObjectURL(file);
+      const optimisticPreviewUrl = URL.createObjectURL(selectedFile);
       setTransientPreviewUrl(optimisticPreviewUrl);
       uploadPerfRef.current = {
         sequence,
-        name: file.name,
-        size: file.size,
+        name: selectedFile.name,
+        size: selectedFile.size,
         startedAt: started,
         transientLoaded: false,
         stableLoaded: false,
@@ -137,38 +194,49 @@ export const UploadNode = memo(({ id, data, selected, width, height }: UploadNod
           return;
         }
         console.info(
-          `[upload-perf][e2e] preview-state-committed nodeId=${id} name="${file.name}" elapsed=${Math.round(performance.now() - started)}ms`
+          `[upload-perf][e2e] preview-state-committed nodeId=${id} name="${selectedFile.name}" elapsed=${Math.round(performance.now() - started)}ms`
         );
       });
 
       try {
-        const prepared = await prepareNodeImageFromFile(file);
+        const prepared = await prepareNodeImageFromFile(selectedFile);
         const nextData: Partial<UploadImageNodeData> = {
           imageUrl: prepared.imageUrl,
           previewImageUrl: prepared.previewImageUrl,
           aspectRatio: prepared.aspectRatio || '1:1',
-          sourceFileName: file.name,
+          sourceFileName: selectedFile.name,
         };
         if (useUploadFilenameAsNodeTitle) {
-          nextData.displayName = file.name;
+          nextData.displayName = selectedFile.name;
         }
         updateNodeData(id, nextData);
 
         console.info(
-          `[upload-perf][node] processFile success nodeId=${id} name="${file.name}" size=${file.size}B elapsed=${Math.round(performance.now() - started)}ms`
+          `[upload-perf][node] processFile success nodeId=${id} name="${selectedFile.name}" size=${selectedFile.size}B elapsed=${Math.round(performance.now() - started)}ms`
         );
       } catch (error) {
         if (uploadSequenceRef.current === sequence) {
           clearTransientPreview();
         }
         console.error(
-          `[upload-perf][node] processFile failed nodeId=${id} name="${file.name}" size=${file.size}B elapsed=${Math.round(performance.now() - started)}ms`,
+          `[upload-perf][node] processFile failed nodeId=${id} name="${selectedFile.name}" size=${selectedFile.size}B elapsed=${Math.round(performance.now() - started)}ms`,
           error
         );
-        throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        setUploadError(message || t('node.upload.uploadFailed'));
+      } finally {
+        setIsUploading(false);
       }
     },
-    [clearTransientPreview, id, updateNodeData, useUploadFilenameAsNodeTitle]
+    [
+      clearTransientPreview,
+      id,
+      replaceNodeType,
+      setSelectedNode,
+      t,
+      updateNodeData,
+      useUploadFilenameAsNodeTitle,
+    ]
   );
 
   const handleImageLoad = useCallback((event: SyntheticEvent<HTMLImageElement>) => {
@@ -222,7 +290,7 @@ export const UploadNode = memo(({ id, data, selected, width, height }: UploadNod
     async (event: DragEvent<HTMLElement>) => {
       event.preventDefault();
       event.stopPropagation();
-      const file = resolveDroppedImageFile(event.dataTransfer);
+      const file = resolveDroppedMaterialFile(event.dataTransfer);
       if (!file) {
         return;
       }
@@ -240,7 +308,7 @@ export const UploadNode = memo(({ id, data, selected, width, height }: UploadNod
   const handleFileChange = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
       const file = event.target.files?.[0];
-      if (!isImageFile(file)) {
+      if (!isMaterialFile(file)) {
         return;
       }
 
@@ -260,8 +328,8 @@ export const UploadNode = memo(({ id, data, selected, width, height }: UploadNod
   }, [id]);
 
   useEffect(() => {
-    return canvasEventBus.subscribe('upload-node/paste-image', ({ nodeId, file }) => {
-      if (nodeId !== id || !isImageFile(file)) {
+    return canvasEventBus.subscribe('upload-node/paste-material', ({ nodeId, file }) => {
+      if (nodeId !== id || !isMaterialFile(file)) {
         return;
       }
       void processFile(file);
@@ -270,10 +338,10 @@ export const UploadNode = memo(({ id, data, selected, width, height }: UploadNod
 
   const handleNodeClick = useCallback(() => {
     setSelectedNode(id);
-    if (!data.imageUrl && !transientPreviewUrl) {
+    if (!data.imageUrl && !transientPreviewUrl && !isUploading) {
       inputRef.current?.click();
     }
-  }, [data.imageUrl, id, setSelectedNode, transientPreviewUrl]);
+  }, [data.imageUrl, id, isUploading, setSelectedNode, transientPreviewUrl]);
 
   useEffect(() => () => {
     uploadPerfRef.current = null;
@@ -348,20 +416,36 @@ export const UploadNode = memo(({ id, data, selected, width, height }: UploadNod
             {t('nodeToolbar.reupload')}
           </button>
         </div>
+      ) : uploadError ? (
+        <div className="flex h-full w-full flex-col items-center justify-center gap-2 overflow-hidden rounded-[var(--node-radius)] bg-[rgba(127,29,29,0.16)] px-4 text-red-200">
+          <AlertTriangle className="h-7 w-7 opacity-90" />
+          <span className="text-center text-[12px] font-medium leading-5">
+            {t('node.upload.uploadFailed')}
+          </span>
+          <span className="max-h-[76px] overflow-y-auto break-words text-center text-[11px] leading-5 text-red-200/90">
+            {uploadError}
+          </span>
+        </div>
       ) : (
         <label
           className="block h-full w-full overflow-hidden rounded-[var(--node-radius)] bg-[var(--canvas-node-media-bg)]"
         >
           <div className="flex h-full w-full cursor-pointer flex-col items-center justify-center gap-2 text-text-muted/85">
-            <Upload className="h-7 w-7 opacity-60" />
-            <span className="px-3 text-center text-[12px] leading-6">{t('node.upload.hint')}</span>
+            {isUploading ? (
+              <Loader2 className="h-7 w-7 animate-spin opacity-70" />
+            ) : (
+              <Upload className="h-7 w-7 opacity-60" />
+            )}
+            <span className="px-3 text-center text-[12px] leading-6">
+              {isUploading ? t('node.upload.uploading') : t('node.upload.hint')}
+            </span>
           </div>
         </label>
       )}
       <input
         ref={inputRef}
         type="file"
-        accept="image/*"
+        accept="image/*,video/*,audio/*"
         className="hidden"
         onChange={handleFileChange}
       />

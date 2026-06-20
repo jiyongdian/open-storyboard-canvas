@@ -50,22 +50,28 @@ import {
   type CanvasNodeData,
   type CanvasNodeType,
   DEFAULT_NODE_WIDTH,
+  type AudioNodeData,
   type VideoNodeData,
 } from '@/features/canvas/domain/canvasNodes';
 import {
+  prepareNodeImage,
   prepareNodeImageFromFile,
   resolveImageDisplayUrl,
 } from '@/features/canvas/application/imageData';
 import { clearBrowserTextSelection } from '@/features/canvas/application/textSelection';
 import { copyImageSourceToClipboard, readSystemClipboard } from '@/commands/image';
 import {
-  dataTransferHasFile,
-  dataTransferHasImageFile,
-  dataTransferHasVideoFile,
-  resolveDroppedImageFile,
-  resolveDroppedVideoFile,
+  dataTransferHasExternalFilePayload,
+  dataTransferHasMaterialFile,
+  isAudioFile,
+  isImageFile,
+  isVideoFile,
+  resolveDroppedMaterialFile,
+  resolveDroppedMaterialSource,
+  type DroppedMaterialSource,
 } from '@/features/canvas/application/imageDragDrop';
-import { prepareVideoNodeDataFromFile } from '@/features/canvas/application/videoUpload';
+import { prepareVideoNodeDataFromFile, prepareVideoNodeDataFromSource } from '@/features/canvas/application/videoUpload';
+import { prepareAudioNodeDataFromFile, prepareAudioNodeDataFromSource } from '@/features/canvas/application/audioUpload';
 import {
   getConnectMenuNodeTypes,
   nodeHasSourceHandle,
@@ -438,6 +444,7 @@ function buildDuplicateEdge(
 }
 
 interface ClipboardContentReadResult {
+  mediaFile: File | null;
   imageFile: File | null;
   text: string;
   fingerprint: string | null;
@@ -455,7 +462,7 @@ interface SystemClipboardPasteOptions {
   pasteIntoSelectedUpload?: boolean;
 }
 
-interface BrowserClipboardImageReadResult {
+interface BrowserClipboardMediaReadResult {
   file: File | null;
   readFailed: boolean;
 }
@@ -488,9 +495,20 @@ function hashText(text: string): string {
   return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
-async function fingerprintImageFile(file: File): Promise<string> {
+function resolveMediaFingerprintKind(file: File): 'image' | 'video' | 'audio' | 'file' {
+  if (isImageFile(file)) return 'image';
+  if (isVideoFile(file)) return 'video';
+  if (isAudioFile(file)) return 'audio';
+  return 'file';
+}
+
+async function fingerprintMediaFile(file: File): Promise<string> {
   const bytes = new Uint8Array(await file.arrayBuffer());
-  return `image:${file.type || 'application/octet-stream'}:${bytes.byteLength}:${hashBytes(bytes)}`;
+  return `${resolveMediaFingerprintKind(file)}:${file.type || 'application/octet-stream'}:${bytes.byteLength}:${hashBytes(bytes)}`;
+}
+
+async function fingerprintImageFile(file: File): Promise<string> {
+  return fingerprintMediaFile(file);
 }
 
 function fingerprintClipboardContent(content: {
@@ -508,7 +526,17 @@ function fingerprintClipboardContent(content: {
   return null;
 }
 
-async function readBrowserClipboardImageFile(): Promise<BrowserClipboardImageReadResult> {
+function createClipboardFile(blob: Blob, mimeType: string, fallbackKind: 'image' | 'video' | 'audio'): File {
+  const subtype = mimeType.split('/')[1]?.split('+')[0] || (
+    fallbackKind === 'image' ? 'png' : fallbackKind === 'video' ? 'mp4' : 'mp3'
+  );
+  return new File([blob], `pasted-${fallbackKind}.${subtype}`, {
+    type: blob.type || mimeType,
+    lastModified: Date.now(),
+  });
+}
+
+async function readBrowserClipboardMediaFile(): Promise<BrowserClipboardMediaReadResult> {
   const clipboard = navigator.clipboard as Clipboard & {
     read?: () => Promise<ClipboardItem[]>;
   };
@@ -518,23 +546,23 @@ async function readBrowserClipboardImageFile(): Promise<BrowserClipboardImageRea
 
   try {
     const items = await clipboard.read();
-    for (const item of items) {
-      const imageType = item.types.find((type) => type.startsWith('image/'));
-      if (!imageType) {
-        continue;
+    const mediaPrefixes = ['image/', 'video/', 'audio/'] as const;
+    for (const prefix of mediaPrefixes) {
+      for (const item of items) {
+        const mediaType = item.types.find((type) => type.startsWith(prefix));
+        if (!mediaType) {
+          continue;
+        }
+        const blob = await item.getType(mediaType);
+        const kind = prefix.slice(0, -1) as 'image' | 'video' | 'audio';
+        return {
+          file: createClipboardFile(blob, blob.type || mediaType, kind),
+          readFailed: false,
+        };
       }
-      const blob = await item.getType(imageType);
-      const subtype = imageType.split('/')[1]?.split('+')[0] || 'png';
-      return {
-        file: new File([blob], `pasted-image.${subtype}`, {
-          type: blob.type || imageType,
-          lastModified: Date.now(),
-        }),
-        readFailed: false,
-      };
     }
   } catch (error) {
-    console.warn('Failed to read image from clipboard', error);
+    console.warn('Failed to read media from clipboard', error);
     return { file: null, readFailed: true };
   }
 
@@ -555,6 +583,7 @@ async function readBrowserClipboardText(): Promise<BrowserClipboardTextReadResul
 
 function emptyClipboardContent(readFailed = false): ClipboardContentReadResult {
   return {
+    mediaFile: null,
     imageFile: null,
     text: '',
     fingerprint: null,
@@ -563,15 +592,17 @@ function emptyClipboardContent(readFailed = false): ClipboardContentReadResult {
 }
 
 async function readBrowserClipboardContent(): Promise<ClipboardContentReadResult> {
-  const imageRead = await readBrowserClipboardImageFile();
+  const mediaRead = await readBrowserClipboardMediaFile();
   const textRead = await readBrowserClipboardText();
+  const mediaFile = mediaRead.file;
   return {
-    imageFile: imageRead.file,
+    mediaFile,
+    imageFile: isImageFile(mediaFile) ? mediaFile : null,
     text: textRead.text,
-    fingerprint: imageRead.file
-      ? await fingerprintImageFile(imageRead.file)
+    fingerprint: mediaFile
+      ? await fingerprintMediaFile(mediaFile)
       : fingerprintClipboardContent({ text: textRead.text }),
-    readFailed: imageRead.readFailed || textRead.readFailed,
+    readFailed: mediaRead.readFailed || textRead.readFailed,
   };
 }
 
@@ -580,13 +611,15 @@ async function readTauriClipboardContent(): Promise<ClipboardContentReadResult |
     const systemClipboard = await readSystemClipboard();
     if (systemClipboard) {
       const image = systemClipboard.image;
+      const imageFile = image
+        ? new File([new Uint8Array(image.bytes)], image.fileName || 'pasted-image.png', {
+            type: image.mimeType || 'image/png',
+            lastModified: Date.now(),
+          })
+        : null;
       return {
-        imageFile: image
-          ? new File([new Uint8Array(image.bytes)], image.fileName || 'pasted-image.png', {
-              type: image.mimeType || 'image/png',
-              lastModified: Date.now(),
-            })
-          : null,
+        mediaFile: imageFile,
+        imageFile,
         text: systemClipboard.text ?? '',
         fingerprint: fingerprintClipboardContent(systemClipboard),
       };
@@ -673,7 +706,7 @@ async function writeTextToClipboard(text: string): Promise<void> {
 }
 
 function hasClipboardPayload(content: ClipboardContentReadResult): boolean {
-  return Boolean(content.imageFile || content.text.trim() || content.fingerprint);
+  return Boolean(content.mediaFile || content.imageFile || content.text.trim() || content.fingerprint);
 }
 
 function resolveNodeImageClipboardSource(node: CanvasNode): string {
@@ -2034,14 +2067,198 @@ export function Canvas() {
     [addNode, scheduleCanvasPersist, setSelectedNode, useUploadFilenameAsNodeTitle]
   );
 
-  const createVideoNodeFromFileAtClientPosition = useCallback(
-    async (file: File, clientPosition: { x: number; y: number }) => {
-      await createVideoNodeFromFileAtFlowPosition(
+  const createAudioNodeFromFileAtFlowPosition = useCallback(
+    async (file: File, flowPosition: { x: number; y: number }) => {
+      try {
+        const prepared = await prepareAudioNodeDataFromFile(file);
+        const nodeData: Partial<AudioNodeData> = {
+          ...prepared,
+        };
+        if (useUploadFilenameAsNodeTitle) {
+          nodeData.displayName = file.name;
+        }
+        const newNodeId = addNode(
+          CANVAS_NODE_TYPES.audio,
+          flowPosition,
+          nodeData
+        );
+        setSelectedNode(newNodeId);
+        scheduleCanvasPersist(0);
+        return newNodeId;
+      } catch (error) {
+        console.error('Failed to import audio onto canvas', error);
+        return null;
+      }
+    },
+    [addNode, scheduleCanvasPersist, setSelectedNode, useUploadFilenameAsNodeTitle]
+  );
+
+  const createUploadImageNodeFromSourceAtFlowPosition = useCallback(
+    async (
+      source: string,
+      flowPosition: { x: number; y: number },
+      sourceFileName?: string | null
+    ) => {
+      try {
+        const prepared = await prepareNodeImage(source);
+        const nodeData: Partial<CanvasNodeData> = {
+          imageUrl: prepared.imageUrl,
+          previewImageUrl: prepared.previewImageUrl,
+          aspectRatio: prepared.aspectRatio || '1:1',
+          sourceFileName: sourceFileName ?? null,
+        };
+        if (useUploadFilenameAsNodeTitle && sourceFileName) {
+          nodeData.displayName = sourceFileName;
+        }
+        const newNodeId = addNode(
+          CANVAS_NODE_TYPES.upload,
+          flowPosition,
+          nodeData
+        );
+        setSelectedNode(newNodeId);
+        scheduleCanvasPersist(0);
+        return newNodeId;
+      } catch (error) {
+        console.error('Failed to import image source onto canvas', error);
+        return null;
+      }
+    },
+    [addNode, scheduleCanvasPersist, setSelectedNode, useUploadFilenameAsNodeTitle]
+  );
+
+  const createVideoNodeFromSourceAtFlowPosition = useCallback(
+    async (
+      source: string,
+      flowPosition: { x: number; y: number },
+      sourceFileName?: string | null
+    ) => {
+      try {
+        const prepared = await prepareVideoNodeDataFromSource(source, sourceFileName);
+        const nodeData: Partial<VideoNodeData> = {
+          ...prepared,
+        };
+        if (useUploadFilenameAsNodeTitle && sourceFileName) {
+          nodeData.displayName = sourceFileName;
+        }
+        const newNodeId = addNode(
+          CANVAS_NODE_TYPES.video,
+          flowPosition,
+          nodeData
+        );
+        setSelectedNode(newNodeId);
+        scheduleCanvasPersist(0);
+        return newNodeId;
+      } catch (error) {
+        console.error('Failed to import video source onto canvas', error);
+        return null;
+      }
+    },
+    [addNode, scheduleCanvasPersist, setSelectedNode, useUploadFilenameAsNodeTitle]
+  );
+
+  const createAudioNodeFromSourceAtFlowPosition = useCallback(
+    async (
+      source: string,
+      flowPosition: { x: number; y: number },
+      sourceFileName?: string | null
+    ) => {
+      try {
+        const prepared = await prepareAudioNodeDataFromSource(source, sourceFileName);
+        const nodeData: Partial<AudioNodeData> = {
+          ...prepared,
+        };
+        if (useUploadFilenameAsNodeTitle && sourceFileName) {
+          nodeData.displayName = sourceFileName;
+        }
+        const newNodeId = addNode(
+          CANVAS_NODE_TYPES.audio,
+          flowPosition,
+          nodeData
+        );
+        setSelectedNode(newNodeId);
+        scheduleCanvasPersist(0);
+        return newNodeId;
+      } catch (error) {
+        console.error('Failed to import audio source onto canvas', error);
+        return null;
+      }
+    },
+    [addNode, scheduleCanvasPersist, setSelectedNode, useUploadFilenameAsNodeTitle]
+  );
+
+  const createMaterialNodeFromFileAtFlowPosition = useCallback(
+    async (
+      file: File,
+      flowPosition: { x: number; y: number }
+    ): Promise<{ nodeId: string; type: CanvasNodeType } | null> => {
+      const fileType = file.type;
+      const fileName = file.name;
+      if (isImageFile(file)) {
+        const nodeId = await createUploadImageNodeAtFlowPosition(file, flowPosition);
+        return nodeId ? { nodeId, type: CANVAS_NODE_TYPES.upload } : null;
+      }
+      if (isVideoFile(file)) {
+        const nodeId = await createVideoNodeFromFileAtFlowPosition(file, flowPosition);
+        return nodeId ? { nodeId, type: CANVAS_NODE_TYPES.video } : null;
+      }
+      if (isAudioFile(file)) {
+        const nodeId = await createAudioNodeFromFileAtFlowPosition(file, flowPosition);
+        return nodeId ? { nodeId, type: CANVAS_NODE_TYPES.audio } : null;
+      }
+
+      console.warn('Unsupported material file dropped onto canvas', fileType, fileName);
+      return null;
+    },
+    [
+      createAudioNodeFromFileAtFlowPosition,
+      createUploadImageNodeAtFlowPosition,
+      createVideoNodeFromFileAtFlowPosition,
+    ]
+  );
+
+  const createMaterialNodeFromSourceAtFlowPosition = useCallback(
+    async (
+      material: DroppedMaterialSource,
+      flowPosition: { x: number; y: number }
+    ): Promise<{ nodeId: string; type: CanvasNodeType } | null> => {
+      if (material.kind === 'image') {
+        const nodeId = await createUploadImageNodeFromSourceAtFlowPosition(
+          material.source,
+          flowPosition,
+          material.fileName
+        );
+        return nodeId ? { nodeId, type: CANVAS_NODE_TYPES.upload } : null;
+      }
+      if (material.kind === 'video') {
+        const nodeId = await createVideoNodeFromSourceAtFlowPosition(
+          material.source,
+          flowPosition,
+          material.fileName
+        );
+        return nodeId ? { nodeId, type: CANVAS_NODE_TYPES.video } : null;
+      }
+      const nodeId = await createAudioNodeFromSourceAtFlowPosition(
+        material.source,
+        flowPosition,
+        material.fileName
+      );
+      return nodeId ? { nodeId, type: CANVAS_NODE_TYPES.audio } : null;
+    },
+    [
+      createAudioNodeFromSourceAtFlowPosition,
+      createUploadImageNodeFromSourceAtFlowPosition,
+      createVideoNodeFromSourceAtFlowPosition,
+    ]
+  );
+
+  const createMaterialNodeFromFileAtClientPosition = useCallback(
+    async (file: File, clientPosition: { x: number; y: number }) => (
+      await createMaterialNodeFromFileAtFlowPosition(
         file,
         reactFlowInstance.screenToFlowPosition(clientPosition)
-      );
-    },
-    [createVideoNodeFromFileAtFlowPosition, reactFlowInstance]
+      )
+    ),
+    [createMaterialNodeFromFileAtFlowPosition, reactFlowInstance]
   );
 
   const pasteImageAtCanvasPosition = useCallback(
@@ -2063,6 +2280,25 @@ export function Canvas() {
     [createUploadImageNodeAtClientPosition]
   );
 
+  const pasteMaterialAtCanvasPosition = useCallback(
+    async (file: File) => {
+      const containerRect = wrapperRef.current?.getBoundingClientRect();
+      const clientPosition = lastCanvasPointerRef.current ?? (
+        containerRect
+          ? {
+              x: containerRect.left + containerRect.width / 2,
+              y: containerRect.top + containerRect.height / 2,
+            }
+          : {
+              x: window.innerWidth / 2,
+              y: window.innerHeight / 2,
+            }
+      );
+      await createMaterialNodeFromFileAtClientPosition(file, clientPosition);
+    },
+    [createMaterialNodeFromFileAtClientPosition]
+  );
+
   const resolveShortcutPasteFlowPosition = useCallback(() => {
     const containerRect = wrapperRef.current?.getBoundingClientRect();
     const clientPosition = lastCanvasPointerRef.current ?? (
@@ -2081,15 +2317,15 @@ export function Canvas() {
 
   useEffect(() => {
     const handleWindowFileDragOver = (event: DragEvent) => {
-      if (!dataTransferHasFile(event.dataTransfer)) {
+      if (!dataTransferHasExternalFilePayload(event.dataTransfer)) {
         return;
       }
 
       event.preventDefault();
       if (event.dataTransfer) {
         event.dataTransfer.dropEffect = (
-          dataTransferHasImageFile(event.dataTransfer)
-          || dataTransferHasVideoFile(event.dataTransfer)
+          dataTransferHasMaterialFile(event.dataTransfer)
+          || dataTransferHasExternalFilePayload(event.dataTransfer)
         )
           ? 'copy'
           : 'none';
@@ -2097,7 +2333,7 @@ export function Canvas() {
     };
 
     const handleWindowFileDrop = (event: DragEvent) => {
-      if (!dataTransferHasFile(event.dataTransfer)) {
+      if (!dataTransferHasExternalFilePayload(event.dataTransfer)) {
         return;
       }
 
@@ -2106,22 +2342,27 @@ export function Canvas() {
 
     window.addEventListener('dragover', handleWindowFileDragOver, true);
     window.addEventListener('drop', handleWindowFileDrop, true);
+    document.addEventListener('dragover', handleWindowFileDragOver, true);
+    document.addEventListener('drop', handleWindowFileDrop, true);
 
     return () => {
       window.removeEventListener('dragover', handleWindowFileDragOver, true);
       window.removeEventListener('drop', handleWindowFileDrop, true);
+      document.removeEventListener('dragover', handleWindowFileDragOver, true);
+      document.removeEventListener('drop', handleWindowFileDrop, true);
     };
   }, []);
 
   const handleCanvasDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
-    if (!dataTransferHasFile(event.dataTransfer)) {
+    if (!dataTransferHasExternalFilePayload(event.dataTransfer)) {
       return;
     }
 
     event.preventDefault();
+    event.stopPropagation();
     event.dataTransfer.dropEffect = (
-      dataTransferHasImageFile(event.dataTransfer)
-      || dataTransferHasVideoFile(event.dataTransfer)
+      dataTransferHasMaterialFile(event.dataTransfer)
+      || dataTransferHasExternalFilePayload(event.dataTransfer)
     )
       ? 'copy'
       : 'none';
@@ -2129,31 +2370,34 @@ export function Canvas() {
 
   const handleCanvasDrop = useCallback(
     (event: ReactDragEvent<HTMLDivElement>) => {
-      if (!dataTransferHasFile(event.dataTransfer)) {
+      if (!dataTransferHasExternalFilePayload(event.dataTransfer)) {
         return;
       }
 
       event.preventDefault();
-      const imageFile = resolveDroppedImageFile(event.dataTransfer);
-      if (imageFile) {
-        void createUploadImageNodeAtClientPosition(imageFile, {
-          x: event.clientX,
-          y: event.clientY,
-        });
+      event.stopPropagation();
+      const materialFile = resolveDroppedMaterialFile(event.dataTransfer);
+      if (!materialFile) {
+        const materialSource = resolveDroppedMaterialSource(event.dataTransfer);
+        if (!materialSource) {
+          return;
+        }
+        void createMaterialNodeFromSourceAtFlowPosition(
+          materialSource,
+          reactFlowInstance.screenToFlowPosition({
+            x: event.clientX,
+            y: event.clientY,
+          })
+        );
         return;
       }
 
-      const videoFile = resolveDroppedVideoFile(event.dataTransfer);
-      if (!videoFile) {
-        return;
-      }
-
-      void createVideoNodeFromFileAtClientPosition(videoFile, {
+      void createMaterialNodeFromFileAtClientPosition(materialFile, {
         x: event.clientX,
         y: event.clientY,
       });
     },
-    [createUploadImageNodeAtClientPosition, createVideoNodeFromFileAtClientPosition]
+    [createMaterialNodeFromFileAtClientPosition, createMaterialNodeFromSourceAtFlowPosition, reactFlowInstance]
   );
 
   const handleCanvasPointerMove = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
@@ -2815,6 +3059,22 @@ export function Canvas() {
     [addEdge, createUploadImageNodeAtFlowPosition, scheduleCanvasPersist]
   );
 
+  const pasteMaterialAsNodeReference = useCallback(
+    async (file: File, targetNode: CanvasNode) => {
+      const created = await createMaterialNodeFromFileAtFlowPosition(file, {
+        x: targetNode.position.x - 300,
+        y: targetNode.position.y,
+      });
+      if (!created) {
+        return false;
+      }
+      addEdge(created.nodeId, targetNode.id);
+      scheduleCanvasPersist(0);
+      return true;
+    },
+    [addEdge, createMaterialNodeFromFileAtFlowPosition, scheduleCanvasPersist]
+  );
+
   const pasteVideoSourceAsNodeReference = useCallback(
     (videoSource: string, targetNode: CanvasNode) => {
       const trimmedSource = videoSource.trim();
@@ -2910,12 +3170,14 @@ export function Canvas() {
         || targetNode?.type === CANVAS_NODE_TYPES.aiVideo
         || targetNode?.type === CANVAS_NODE_TYPES.aiText;
       const isTextPasteTarget = targetNode?.type === CANVAS_NODE_TYPES.textAnnotation;
-      const imageFile = clipboardContent.imageFile;
+      const mediaFile = clipboardContent.mediaFile ?? clipboardContent.imageFile;
+      const imageFile = clipboardContent.imageFile ?? (isImageFile(mediaFile) ? mediaFile : null);
 
-      if (imageFile && options.pasteIntoSelectedUpload && targetNode?.type === CANVAS_NODE_TYPES.upload) {
-        canvasEventBus.publish('upload-node/paste-image', {
+      const materialFile = mediaFile ?? imageFile;
+      if (materialFile && options.pasteIntoSelectedUpload && targetNode?.type === CANVAS_NODE_TYPES.upload) {
+        canvasEventBus.publish('upload-node/paste-material', {
           nodeId: targetNode.id,
-          file: imageFile,
+          file: materialFile,
         });
         markSystemClipboardFresh();
         return true;
@@ -2924,6 +3186,14 @@ export function Canvas() {
       if (isPromptPasteTarget && targetNode) {
         if (imageFile) {
           const handled = await pasteImageAsNodeReference(imageFile, targetNode);
+          if (handled) {
+            markSystemClipboardFresh();
+            return true;
+          }
+        }
+
+        if (mediaFile && !imageFile) {
+          const handled = await pasteMaterialAsNodeReference(mediaFile, targetNode);
           if (handled) {
             markSystemClipboardFresh();
             return true;
@@ -2961,6 +3231,21 @@ export function Canvas() {
         return true;
       }
 
+      if (mediaFile && !imageFile) {
+        if (options.flowPosition) {
+          const created = await createMaterialNodeFromFileAtFlowPosition(mediaFile, options.flowPosition);
+          if (created) {
+            markSystemClipboardFresh();
+            return true;
+          }
+          return false;
+        }
+
+        await pasteMaterialAtCanvasPosition(mediaFile);
+        markSystemClipboardFresh();
+        return true;
+      }
+
       if (pasteTextAsTextNode(clipboardContent.text, options.flowPosition)) {
         markSystemClipboardFresh();
         return true;
@@ -2970,9 +3255,12 @@ export function Canvas() {
     },
     [
       createUploadImageNodeAtFlowPosition,
+      createMaterialNodeFromFileAtFlowPosition,
       markSystemClipboardFresh,
       pasteImageAsNodeReference,
       pasteImageAtCanvasPosition,
+      pasteMaterialAsNodeReference,
+      pasteMaterialAtCanvasPosition,
       pasteTextAsTextNode,
       pasteTextIntoPromptNode,
       pasteTextIntoTextNode,
@@ -3008,15 +3296,16 @@ export function Canvas() {
     selectedUploadNodeId,
   ]);
 
-  const pasteImageFromClipboardEvent = useCallback(async (file: File) => {
+  const pasteMediaFromClipboardEvent = useCallback(async (file: File) => {
     const selectedTargetNode = selectedNodeId
       ? useCanvasStore.getState().nodes.find((node) => node.id === selectedNodeId) ?? null
       : null;
     await pasteSystemClipboardContent(
       {
-        imageFile: file,
+        mediaFile: file,
+        imageFile: isImageFile(file) ? file : null,
         text: '',
-        fingerprint: `event-image:${file.name}:${file.size}:${file.type}:${file.lastModified}`,
+        fingerprint: `event-${resolveMediaFingerprintKind(file)}:${file.name}:${file.size}:${file.type}:${file.lastModified}`,
       },
       {
         targetNode: selectedTargetNode,
@@ -3027,12 +3316,20 @@ export function Canvas() {
     );
   }, [pasteSystemClipboardContent, selectedNodeId, selectedUploadNodeId]);
 
+  const pasteImageFromClipboardEvent = useCallback(
+    async (file: File) => {
+      await pasteMediaFromClipboardEvent(file);
+    },
+    [pasteMediaFromClipboardEvent]
+  );
+
   const pasteTextFromClipboardEvent = useCallback(async (text: string) => {
     const selectedTargetNode = selectedNodeId
       ? useCanvasStore.getState().nodes.find((node) => node.id === selectedNodeId) ?? null
       : null;
     await pasteSystemClipboardContent(
       {
+        mediaFile: null,
         imageFile: null,
         text,
         fingerprint: `event-text:${text.trim().length}:${hashText(text.trim())}`,
@@ -3045,6 +3342,7 @@ export function Canvas() {
   }, [pasteSystemClipboardContent, resolveShortcutPasteFlowPosition, selectedNodeId]);
 
   const shouldHandleClipboardEventPaste = useCallback(async (payload: {
+    mediaFile?: File | null;
     imageFile: File | null;
     text: string;
   }) => {
@@ -3067,13 +3365,15 @@ export function Canvas() {
       return false;
     }
 
-    const eventFingerprint = payload.imageFile
-      ? await fingerprintImageFile(payload.imageFile)
+    const eventFingerprint = payload.mediaFile
+      ? await fingerprintMediaFile(payload.mediaFile)
+      : payload.imageFile
+        ? await fingerprintImageFile(payload.imageFile)
       : fingerprintClipboardContent({ text: payload.text });
     return Boolean(eventFingerprint && eventFingerprint !== settledInternalBaseline);
   }, []);
 
-  // Keyboard shortcuts (undo/redo/copy/paste/group/delete) + paste-image
+  // Keyboard shortcuts (undo/redo/copy/paste/group/delete) + pasted-media
   // bridge to upload nodes — see hook for the coordination details
   // between the `paste` and `keydown` listeners.
   useCanvasShortcuts({
@@ -3092,6 +3392,7 @@ export function Canvas() {
     markSystemClipboardFresh,
     pasteImageAtCanvasPosition,
     pasteImageFromClipboardEvent,
+    pasteMediaFromClipboardEvent,
     pasteTextFromClipboardEvent,
     shouldHandleClipboardEventPaste,
   });
@@ -3113,6 +3414,7 @@ export function Canvas() {
       targetNode.type === CANVAS_NODE_TYPES.upload
       || targetNode.type === CANVAS_NODE_TYPES.exportImage
       || targetNode.type === CANVAS_NODE_TYPES.video
+      || targetNode.type === CANVAS_NODE_TYPES.audio
     )
       ? (() => {
           const nodeMap = new Map(useCanvasStore.getState().nodes.map((node) => [node.id, node] as const));

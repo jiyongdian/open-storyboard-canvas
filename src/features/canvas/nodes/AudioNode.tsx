@@ -18,13 +18,16 @@ import {
   type AudioNodeData,
   type CanvasNodeType,
 } from '@/features/canvas/domain/canvasNodes';
-import { resolveNodeDisplayName } from '@/features/canvas/domain/nodeDisplay';
+import { isNodeUsingDefaultDisplayName, resolveNodeDisplayName } from '@/features/canvas/domain/nodeDisplay';
 import { resolveImageDisplayUrl } from '@/features/canvas/application/imageData';
+import { isAudioFile, resolveDroppedAudioFile } from '@/features/canvas/application/imageDragDrop';
+import { prepareAudioNodeDataFromFile } from '@/features/canvas/application/audioUpload';
 import { NodeHeader, NODE_HEADER_FLOATING_POSITION_CLASS } from '@/features/canvas/ui/NodeHeader';
 import { NodeResizeHandle } from '@/features/canvas/ui/NodeResizeHandle';
 import { formatGenerationElapsedMs } from '@/features/canvas/ui/generationElapsed';
 import { loadAudioSourceDataUrl } from '@/commands/image';
 import { useCanvasStore } from '@/stores/canvasStore';
+import { useSettingsStore } from '@/stores/settingsStore';
 
 type AudioNodeProps = NodeProps & {
   id: string;
@@ -45,30 +48,6 @@ function resolveNodeDimension(value: number | undefined, fallback: number): numb
     return Math.round(value);
   }
   return fallback;
-}
-
-function isAudioFile(file: File | null | undefined): file is File {
-  if (!file) {
-    return false;
-  }
-  return file.type.startsWith('audio/') || /\.(mp3|wav|m4a|aac|ogg|flac|webm)$/i.test(file.name);
-}
-
-function resolveDroppedAudioFile(dataTransfer: DataTransfer): File | null {
-  const files = Array.from(dataTransfer.files ?? []);
-  return files.find(isAudioFile) ?? null;
-}
-
-function readFileAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = () => reject(reader.error ?? new Error('Failed to read audio file'));
-    reader.onload = () => {
-      const result = typeof reader.result === 'string' ? reader.result : '';
-      result ? resolve(result) : reject(new Error('Failed to read audio file'));
-    };
-    reader.readAsDataURL(file);
-  });
 }
 
 function formatAudioTime(value: number | null | undefined): string {
@@ -178,6 +157,7 @@ export const AudioNode = memo(({ id, data, selected, type, width, height }: Audi
   const objectUrlRef = useRef<string | null>(null);
   const updateNodeData = useCanvasStore((state) => state.updateNodeData);
   const setSelectedNode = useCanvasStore((state) => state.setSelectedNode);
+  const useUploadFilenameAsNodeTitle = useSettingsStore((state) => state.useUploadFilenameAsNodeTitle);
   const [now, setNow] = useState(() => Date.now());
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -201,10 +181,18 @@ export const AudioNode = memo(({ id, data, selected, type, width, height }: Audi
     resolveNodeDimension(height, AUDIO_NODE_DEFAULT_HEIGHT),
     AUDIO_NODE_MIN_HEIGHT
   );
-  const resolvedTitle = useMemo(
-    () => resolveNodeDisplayName(type as CanvasNodeType, data),
-    [data, type]
-  );
+  const resolvedTitle = useMemo(() => {
+    const sourceFileName = typeof data.sourceFileName === 'string' ? data.sourceFileName.trim() : '';
+    if (
+      useUploadFilenameAsNodeTitle
+      && sourceFileName
+      && isNodeUsingDefaultDisplayName(CANVAS_NODE_TYPES.audio, data)
+    ) {
+      return sourceFileName;
+    }
+
+    return resolveNodeDisplayName(type as CanvasNodeType, data);
+  }, [data, type, useUploadFilenameAsNodeTitle]);
   const liveGenerationElapsedMs = isGenerating && generationStartedAt !== null
     ? Math.max(0, now - generationStartedAt)
     : data.generationElapsedMs;
@@ -325,18 +313,16 @@ export const AudioNode = memo(({ id, data, selected, type, width, height }: Audi
     const previewUrl = URL.createObjectURL(file);
     objectUrlRef.current = previewUrl;
     setObjectUrl(previewUrl);
-    const dataUrl = await readFileAsDataUrl(file);
+    const prepared = await prepareAudioNodeDataFromFile(file);
     updateNodeData(id, {
-      audioUrl: dataUrl,
-      localAudioUrl: dataUrl,
-      sourceFileName: file.name,
-      displayName: file.name,
+      ...prepared,
+      ...(useUploadFilenameAsNodeTitle ? { displayName: file.name } : {}),
       isGenerating: false,
       generationError: null,
       generationStartedAt: null,
       generationElapsedMs: null,
     });
-  }, [id, updateNodeData]);
+  }, [id, updateNodeData, useUploadFilenameAsNodeTitle]);
 
   const handleFileChange = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0] ?? null;

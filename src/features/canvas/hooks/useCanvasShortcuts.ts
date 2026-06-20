@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from 'react';
 
 import type { CanvasNode } from '@/features/canvas/domain/canvasNodes';
 import { canvasEventBus } from '@/features/canvas/application/canvasServices';
+import { isAudioFile, isImageFile, isVideoFile } from '@/features/canvas/application/imageDragDrop';
 
 function isTypingTarget(target: EventTarget | null): boolean {
   const element = target as HTMLElement | null;
@@ -42,11 +43,52 @@ export function resolveClipboardImageFile(event: ClipboardEvent): File | null {
   return null;
 }
 
+function resolveClipboardMediaFile(event: ClipboardEvent): File | null {
+  const clipboardItems = event.clipboardData?.items;
+  if (!clipboardItems) {
+    return null;
+  }
+
+  const candidates: File[] = [];
+  for (const item of Array.from(clipboardItems)) {
+    if (item.kind !== 'file') {
+      continue;
+    }
+    const file = item.getAsFile();
+    if (!file) {
+      continue;
+    }
+    const existingName = typeof file.name === 'string' ? file.name.trim() : '';
+    if (existingName) {
+      candidates.push(file);
+      continue;
+    }
+
+    const kind = item.type.startsWith('video/')
+      ? 'video'
+      : item.type.startsWith('audio/')
+        ? 'audio'
+        : 'image';
+    const subtype = item.type.split('/')[1]?.split('+')[0] || (kind === 'image' ? 'png' : kind === 'video' ? 'mp4' : 'mp3');
+    candidates.push(new File([file], `pasted-${kind}.${subtype}`, {
+      type: file.type || item.type,
+      lastModified: Date.now(),
+    }));
+  }
+
+  return (
+    candidates.find(isImageFile)
+    || candidates.find(isVideoFile)
+    || candidates.find(isAudioFile)
+    || null
+  );
+}
+
 export interface UseCanvasShortcutsArgs {
   nodes: CanvasNode[];
   selectedNodeId: string | null;
   selectedNodeIds: string[];
-  /** When the only selected node is an UploadNode, paste-image goes to
+  /** When the only selected node is an UploadNode, pasted media goes to
    *  it directly instead of duplicating clipboard nodes. Pass `null` to
    *  short-circuit the special case. */
   selectedUploadNodeId: string | null;
@@ -63,15 +105,17 @@ export interface UseCanvasShortcutsArgs {
   markSystemClipboardFresh: () => void;
   pasteImageAtCanvasPosition?: (file: File) => void | Promise<void>;
   pasteImageFromClipboardEvent?: (file: File) => void | Promise<void>;
+  pasteMediaFromClipboardEvent?: (file: File) => void | Promise<void>;
   pasteTextFromClipboardEvent?: (text: string) => void | Promise<void>;
   shouldHandleClipboardEventPaste?: (payload: {
+    mediaFile?: File | null;
     imageFile: File | null;
     text: string;
   }) => boolean | Promise<boolean>;
 }
 
 /**
- * Owns every keyboard / clipboard shortcut and the paste-image bridge
+ * Owns every keyboard / clipboard shortcut and the pasted-media bridge
  * to upload nodes. Previously inlined in Canvas.tsx as two separate
  * effects (one for `paste` events, one for `keydown`) plus three
  * persistent refs that coordinated between them. Pulling all of that
@@ -98,12 +142,13 @@ export function useCanvasShortcuts(args: UseCanvasShortcutsArgs): void {
     markSystemClipboardFresh,
     pasteImageAtCanvasPosition,
     pasteImageFromClipboardEvent,
+    pasteMediaFromClipboardEvent,
     pasteTextFromClipboardEvent,
     shouldHandleClipboardEventPaste,
   } = args;
   const pasteEventHandledAtRef = useRef(0);
 
-  // Forward image-bearing clipboard events to the selected upload node or,
+  // Forward media-bearing clipboard events to the selected upload node or,
   // when no upload node is selected, to the canvas-level paste handler.
   useEffect(() => {
     const handlePaste = (event: ClipboardEvent) => {
@@ -111,9 +156,10 @@ export function useCanvasShortcuts(args: UseCanvasShortcutsArgs): void {
         return;
       }
 
-      const imageFile = resolveClipboardImageFile(event);
+      const mediaFile = resolveClipboardMediaFile(event);
+      const imageFile = mediaFile && isImageFile(mediaFile) ? mediaFile : resolveClipboardImageFile(event);
       const text = event.clipboardData?.getData('text/plain')?.trim() ?? '';
-      if (!imageFile && !text) {
+      if (!mediaFile && !imageFile && !text) {
         return;
       }
 
@@ -124,7 +170,7 @@ export function useCanvasShortcuts(args: UseCanvasShortcutsArgs): void {
         let shouldHandle = true;
         try {
           shouldHandle = shouldHandleClipboardEventPaste
-            ? await shouldHandleClipboardEventPaste({ imageFile, text })
+            ? await shouldHandleClipboardEventPaste({ mediaFile, imageFile, text })
             : true;
         } catch (error) {
           console.warn('Failed to classify clipboard paste event', error);
@@ -137,16 +183,22 @@ export function useCanvasShortcuts(args: UseCanvasShortcutsArgs): void {
 
         markSystemClipboardFresh();
 
-        if (imageFile) {
-          if (selectedUploadNodeId) {
-            canvasEventBus.publish('upload-node/paste-image', {
-              nodeId: selectedUploadNodeId,
-              file: imageFile,
-            });
-            return;
-          }
+        const materialFile = mediaFile ?? imageFile;
+        if (materialFile && selectedUploadNodeId) {
+          canvasEventBus.publish('upload-node/paste-material', {
+            nodeId: selectedUploadNodeId,
+            file: materialFile,
+          });
+          return;
+        }
 
+        if (imageFile) {
           void (pasteImageFromClipboardEvent ?? pasteImageAtCanvasPosition)?.(imageFile);
+          return;
+        }
+
+        if (mediaFile) {
+          void pasteMediaFromClipboardEvent?.(mediaFile);
           return;
         }
 
@@ -164,6 +216,7 @@ export function useCanvasShortcuts(args: UseCanvasShortcutsArgs): void {
     markSystemClipboardFresh,
     pasteImageAtCanvasPosition,
     pasteImageFromClipboardEvent,
+    pasteMediaFromClipboardEvent,
     pasteFromShortcut,
     pasteTextFromClipboardEvent,
     selectedUploadNodeId,

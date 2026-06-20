@@ -1,4 +1,5 @@
 import { persistVideoSource } from '@/commands/image';
+import { resolveImageDisplayUrl } from '@/features/canvas/application/imageData';
 import type { VideoNodeData } from '@/features/canvas/domain/canvasNodes';
 
 const DEFAULT_VIDEO_ASPECT_RATIO = '16:9';
@@ -43,16 +44,15 @@ function formatVideoAspectRatio(width: number, height: number): string {
   return `${ratioWidth}:${ratioHeight}`;
 }
 
-function readVideoFileMetadata(file: File): Promise<VideoFileMetadata> {
+function readVideoSourceMetadata(source: string): Promise<VideoFileMetadata> {
   return new Promise((resolve) => {
-    const objectUrl = URL.createObjectURL(file);
     const video = document.createElement('video');
     let isDone = false;
+    const displaySource = resolveImageDisplayUrl(source);
 
     const cleanup = () => {
       video.removeAttribute('src');
       video.load();
-      URL.revokeObjectURL(objectUrl);
     };
 
     const finish = (metadata: VideoFileMetadata) => {
@@ -88,22 +88,43 @@ function readVideoFileMetadata(file: File): Promise<VideoFileMetadata> {
         durationSeconds: null,
       });
     };
-    video.src = objectUrl;
+    video.src = displaySource;
   });
 }
 
-export async function prepareVideoNodeDataFromFile(file: File): Promise<Partial<VideoNodeData>> {
-  const metadataPromise = readVideoFileMetadata(file);
-  const localVideoUrl = await readFileAsDataUrl(file).then((dataUrl) => persistVideoSource(dataUrl));
-  const metadata = await metadataPromise;
+function readVideoFileMetadata(file: File): Promise<VideoFileMetadata> {
+  const objectUrl = URL.createObjectURL(file);
+  return readVideoSourceMetadata(objectUrl).finally(() => {
+    URL.revokeObjectURL(objectUrl);
+  });
+}
 
+function fileNameFromSource(source: string): string | null {
+  const trimmed = source.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    const pathname = decodeURIComponent(parsed.pathname || '');
+    return pathname.split(/[\\/]/).filter(Boolean).pop() || null;
+  } catch {
+    return trimmed.split(/[\\/]/).filter(Boolean).pop() || null;
+  }
+}
+
+function buildUploadedVideoNodeData(
+  localVideoUrl: string,
+  metadata: VideoFileMetadata,
+  sourceFileName: string | null
+): Partial<VideoNodeData> {
   return {
     videoUrl: localVideoUrl,
     localVideoUrl,
     thumbnailUrl: null,
     aspectRatio: metadata.aspectRatio,
     durationSeconds: metadata.durationSeconds,
-    sourceFileName: file.name,
+    sourceFileName,
     sourceType: 'upload',
     sourcePrompt: '',
     sourceReferenceCount: 0,
@@ -122,4 +143,25 @@ export async function prepareVideoNodeDataFromFile(file: File): Promise<Partial<
     generationRetryResultUrl: null,
     generationRetryRequestedAt: null,
   };
+}
+
+export async function prepareVideoNodeDataFromFile(file: File): Promise<Partial<VideoNodeData>> {
+  const metadataPromise = readVideoFileMetadata(file);
+  const localVideoUrl = await readFileAsDataUrl(file).then((dataUrl) => persistVideoSource(dataUrl));
+  const metadata = await metadataPromise;
+
+  return buildUploadedVideoNodeData(localVideoUrl, metadata, file.name);
+}
+
+export async function prepareVideoNodeDataFromSource(
+  source: string,
+  sourceFileName?: string | null
+): Promise<Partial<VideoNodeData>> {
+  const localVideoUrl = await persistVideoSource(source);
+  const metadata = await readVideoSourceMetadata(localVideoUrl);
+  return buildUploadedVideoNodeData(
+    localVideoUrl,
+    metadata,
+    sourceFileName?.trim() || fileNameFromSource(source)
+  );
 }

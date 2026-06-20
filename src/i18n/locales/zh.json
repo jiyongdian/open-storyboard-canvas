@@ -760,6 +760,7 @@
   "node": {
     "menu": {
       "uploadImage": "上传图片",
+      "uploadMaterial": "上传素材",
       "uploadVideo": "上传视频",
       "aiImageGeneration": "AI 图片",
       "aiVideoGeneration": "AI 视频",
@@ -904,7 +905,9 @@
     },
     "upload": {
       "uploadedAlt": "已上传图片",
-      "hint": "点击或拖拽上传图片"
+      "hint": "点击或拖拽上传图片、视频或音频",
+      "uploading": "正在上传素材…",
+      "uploadFailed": "素材上传失败"
     },
     "storyboardNode": {
       "title": "分镜节点",
@@ -1375,8 +1378,8 @@
     "panoramaControlSensitivityLow": "低",
     "panoramaControlSensitivityMedium": "中",
     "panoramaControlSensitivityHigh": "高",
-    "useUploadFilenameAsNodeTitle": "上传节点自动使用文件名作为标题",
-    "useUploadFilenameAsNodeTitleDesc": "启用后，新上传图片会默认使用文件名作为节点标题（仍可双击手动重命名）。",
+    "useUploadFilenameAsNodeTitle": "上传素材自动使用文件名作为标题",
+    "useUploadFilenameAsNodeTitleDesc": "启用后，新上传的图片、视频、音频会默认使用文件名作为节点标题（仍可双击手动重命名）。",
     "downloadPathPlaceholder": "输入目录路径，例如 /Users/name/Pictures/Storyboard 或 D:\\\\Images\\\\Storyboard",
     "addPath": "添加路径",
     "chooseFolder": "选择文件夹",

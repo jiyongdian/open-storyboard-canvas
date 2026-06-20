@@ -297,7 +297,7 @@ export const ImageEditNode = memo(({ id, data, selected, width, height }: ImageE
   const setSelectedNode = useCanvasStore((state) => state.setSelectedNode);
   const updateNodeData = useCanvasStore((state) => state.updateNodeData);
   const addNode = useCanvasStore((state) => state.addNode);
-  const findNodePosition = useCanvasStore((state) => state.findNodePosition);
+  const findNodePositions = useCanvasStore((state) => state.findNodePositions);
   const addEdge = useCanvasStore((state) => state.addEdge);
   const grsaiNanoBananaProModel = useSettingsStore((state) => state.grsaiNanoBananaProModel);
   const promptPresets = useSettingsStore((state) => state.promptPresets);
@@ -784,13 +784,33 @@ export const ImageEditNode = memo(({ id, data, selected, width, height }: ImageE
       await canvasAiGateway.setApiKey(resolved.providerId, resolved.apiKey);
     }
 
+    const buildDebugContext = (): GenerationDebugContext => ({
+      sourceType: 'imageEdit',
+      providerId: resolved.providerId,
+      requestModel: resolved.modelForGateway,
+      requestSize,
+      requestAspectRatio: resolvedRequestAspectRatio,
+      prompt: promptForRequest,
+      extraParams: gatewayPayload.extraParams,
+      referenceImageCount: latestIncomingImages.length,
+      referenceImagePlaceholders: createReferenceImagePlaceholders(latestIncomingImages.length),
+      appVersion: runtimeDiagnostics.appVersion,
+      osName: runtimeDiagnostics.osName,
+      osVersion: runtimeDiagnostics.osVersion,
+      osBuild: runtimeDiagnostics.osBuild,
+      userAgent: runtimeDiagnostics.userAgent,
+    });
+    const resultNodePositions = findNodePositions(
+      id,
+      effectiveCount,
+      EXPORT_RESULT_NODE_DEFAULT_WIDTH,
+      EXPORT_RESULT_NODE_LAYOUT_HEIGHT
+    );
+    const resultNodes: { nodeId: string }[] = [];
+
     for (let i = 0; i < effectiveCount; i++) {
       const generatedSequence = firstGeneratedSequence + i;
-      const newNodePosition = findNodePosition(
-        id,
-        EXPORT_RESULT_NODE_DEFAULT_WIDTH,
-        EXPORT_RESULT_NODE_LAYOUT_HEIGHT
-      );
+      const newNodePosition = resultNodePositions[i] ?? resultNodePositions[0] ?? { x: 100, y: 100 };
       const nodeTitle = resolveDefaultGeneratedImageDisplayName(generatedSequence, promptForRequest);
       const newNodeId = addNode(
         CANVAS_NODE_TYPES.exportImage,
@@ -812,25 +832,17 @@ export const ImageEditNode = memo(({ id, data, selected, width, height }: ImageE
         }
       );
       addEdge(id, newNodeId);
+      resultNodes.push({ nodeId: newNodeId });
+    }
 
+    await Promise.allSettled(resultNodes.map(async ({ nodeId: newNodeId }) => {
       try {
-        const jobId = await canvasAiGateway.submitGenerateImageJob(gatewayPayload);
-        const generationDebugContext: GenerationDebugContext = {
-          sourceType: 'imageEdit',
-          providerId: resolved.providerId,
-          requestModel: resolved.modelForGateway,
-          requestSize,
-          requestAspectRatio: resolvedRequestAspectRatio,
-          prompt: promptForRequest,
-          extraParams: gatewayPayload.extraParams,
-          referenceImageCount: latestIncomingImages.length,
-          referenceImagePlaceholders: createReferenceImagePlaceholders(latestIncomingImages.length),
-          appVersion: runtimeDiagnostics.appVersion,
-          osName: runtimeDiagnostics.osName,
-          osVersion: runtimeDiagnostics.osVersion,
-          osBuild: runtimeDiagnostics.osBuild,
-          userAgent: runtimeDiagnostics.userAgent,
-        };
+        const jobId = await canvasAiGateway.submitGenerateImageJob({
+          ...gatewayPayload,
+          referenceImages: [...gatewayPayload.referenceImages],
+          extraParams: { ...gatewayPayload.extraParams },
+        });
+        const generationDebugContext = buildDebugContext();
         updateNodeData(newNodeId, {
           generationJobId: jobId,
           generationSourceType: 'imageEdit',
@@ -840,22 +852,7 @@ export const ImageEditNode = memo(({ id, data, selected, width, height }: ImageE
         });
       } catch (generationError) {
         const resolvedError = resolveErrorContent(generationError, t('ai.error'));
-        const generationDebugContext: GenerationDebugContext = {
-          sourceType: 'imageEdit',
-          providerId: resolved.providerId,
-          requestModel: resolved.modelForGateway,
-          requestSize,
-          requestAspectRatio: resolvedRequestAspectRatio,
-          prompt: promptForRequest,
-          extraParams: gatewayPayload.extraParams,
-          referenceImageCount: latestIncomingImages.length,
-          referenceImagePlaceholders: createReferenceImagePlaceholders(latestIncomingImages.length),
-          appVersion: runtimeDiagnostics.appVersion,
-          osName: runtimeDiagnostics.osName,
-          osVersion: runtimeDiagnostics.osVersion,
-          osBuild: runtimeDiagnostics.osBuild,
-          userAgent: runtimeDiagnostics.userAgent,
-        };
+        const generationDebugContext = buildDebugContext();
         const reportText = buildGenerationErrorReport({
           errorMessage: resolvedError.message,
           errorDetails: resolvedError.details,
@@ -880,7 +877,7 @@ export const ImageEditNode = memo(({ id, data, selected, width, height }: ImageE
           generationElapsedMs: Math.max(0, Date.now() - generationStartedAt),
         });
       }
-    }
+    }));
     } finally {
       releaseSubmitLock();
     }
@@ -888,7 +885,7 @@ export const ImageEditNode = memo(({ id, data, selected, width, height }: ImageE
     addNode,
     addEdge,
     assembleImageGenerationRequest,
-    findNodePosition,
+    findNodePositions,
     id,
     t,
     updateNodeData,

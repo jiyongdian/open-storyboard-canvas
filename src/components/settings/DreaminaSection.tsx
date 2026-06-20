@@ -132,7 +132,7 @@ export const DreaminaSection = memo(() => {
       <div>
         <h2 className="text-base font-semibold text-text-dark">Dreamina 即梦</h2>
         <p className="mt-1 text-xs text-text-muted">
-          即梦不需要贴 API Key。它通过本地安装的 <code className="rounded bg-bg-dark px-1">dreamina</code> CLI 登录后使用，本应用会直接调用该 CLI 生图。
+          即梦不需要贴 API Key。它通过本地安装的 <code className="rounded bg-bg-dark px-1">dreamina</code> CLI 登录后使用；检测到已登录且账号可用后，画布会自动解锁即梦图片和视频生成能力。
         </p>
       </div>
 
@@ -142,7 +142,7 @@ export const DreaminaSection = memo(() => {
           <div className="space-y-1">
             <div className="text-sm font-medium text-amber-100">官方 CLI 会员限制提醒</div>
             <p className="text-xs leading-5 text-amber-100/75">
-              即梦官方目前已将 CLI 生图能力限制为高级会员可用。本项目的即梦接入是在 CLI 仍向更多用户开放时完成的；如果你不是高级会员，登录检测可能正常，但提交生图仍可能被官方拒绝。非会员建议优先使用「我的配置」里的自定义服务商。
+              即梦官方目前会按账号权益限制 CLI 图片 / 视频能力。登录检测正常只代表本机 CLI 和登录态可用；如果账号没有对应权益，提交任务仍可能被官方拒绝。非会员或受限账号建议优先使用「我的配置」里的自定义服务商。
             </p>
           </div>
         </div>
@@ -281,16 +281,21 @@ export const DreaminaSection = memo(() => {
 
       {/* Built-in models */}
       <div className="rounded-lg border border-border-dark bg-bg-dark p-4">
-        <div className="text-sm font-medium text-text-dark">③ 可用模型</div>
+        <div className="text-sm font-medium text-text-dark">③ 画布可用能力</div>
         <p className="mt-1 text-[11px] text-text-muted">
-          即梦 CLI 登录成功后，本应用会自动提供以下官方模型，生成节点中直接选用即可。
+          即梦 CLI 登录成功后，本应用会自动提供以下官方能力，生成节点中直接选用即可；能力名称用中文展示，模型原名保留。
         </p>
         <ul className="mt-2 space-y-1 text-[11px] text-text-muted list-disc pl-4">
-          <li>即梦 text2image（文生图，5.0 / 4.6 / 4.5 / 4.1 / 4.0 / 3.1 / 3.0 / lab）</li>
-          <li>即梦 image2image（图生图，4.0+ / lab）</li>
-          <li>即梦 image_upscale（高清放大）</li>
-          <li>Seedance（文生视频 / 图生视频 / 首尾帧 / 多图视频）</li>
+          <li>图片：文生图支持 3.0 / 3.1 / 4.0 / 4.1 / 4.5 / 4.6 / 4.7 / 5.0；3.x 可选 1k / 2k，4.0+ 可选 2k / 4k。</li>
+          <li>图片：图生图支持 4.0 / 4.1 / 4.5 / 4.6 / 4.7 / 5.0，最多 10 张参考图，可选 2k / 4k。</li>
+          <li>图片：高清放大需要 1 张图，可选 2k / 4k / 8k，其中 4k / 8k 通常需要 VIP 权益。</li>
+          <li>视频：文生视频支持 Seedance 2.0 系列和 mini，时长 4-15 秒，普通模型 720p，seedance2.0_vip 可选 1080p。</li>
+          <li>视频：图生视频需要 1 张首帧图；首尾帧成片需要 2 张图；多帧成片支持 2-20 张图。</li>
+          <li>视频：全能参考成片支持图片最多 9 张、视频最多 3 个、音频最多 3 个；音频参考需约 2-15 秒。</li>
         </ul>
+        <div className="mt-3 rounded-md border border-white/10 bg-surface-dark/60 p-2.5 text-[11px] leading-5 text-text-muted">
+          参数入口在画布节点的「参数」里。图片分辨率按 1k / 2k / 4k / 8k 展示；视频分辨率按 720p / 1080p 展示。图生视频、首尾帧和多帧成片的比例由参考图推断，因此画布中显示为「智能」。
+        </div>
       </div>
     </div>
   );

@@ -760,6 +760,7 @@
   "node": {
     "menu": {
       "uploadImage": "Upload Image",
+      "uploadMaterial": "Upload Material",
       "uploadVideo": "Upload Video",
       "aiImageGeneration": "AI Image",
       "aiVideoGeneration": "AI Video",
@@ -904,7 +905,9 @@
     },
     "upload": {
       "uploadedAlt": "Uploaded image",
-      "hint": "Click or drag to upload image"
+      "hint": "Click or drag to upload image, video, or audio",
+      "uploading": "Uploading material...",
+      "uploadFailed": "Material upload failed"
     },
     "storyboardNode": {
       "title": "Storyboard Node",
@@ -1375,8 +1378,8 @@
     "panoramaControlSensitivityLow": "Low",
     "panoramaControlSensitivityMedium": "Medium",
     "panoramaControlSensitivityHigh": "High",
-    "useUploadFilenameAsNodeTitle": "Use uploaded filename as node title",
-    "useUploadFilenameAsNodeTitleDesc": "When enabled, newly uploaded images use the file name as the node title by default (still editable via double-click).",
+    "useUploadFilenameAsNodeTitle": "Use uploaded filename as material title",
+    "useUploadFilenameAsNodeTitleDesc": "When enabled, newly uploaded images, videos, and audio files use the file name as the node title by default (still editable via double-click).",
     "downloadPathPlaceholder": "Input folder path, e.g. /Users/name/Pictures/Storyboard or D:\\\\Images\\\\Storyboard",
     "addPath": "Add Path",
     "chooseFolder": "Choose Folder",
