@@ -531,12 +531,61 @@ function resolveModernImageTier(request: GenerateRequest): '1K' | '2K' | '4K' | 
   return undefined;
 }
 
-function modelLooksLikeGeminiHighResImageModel(modelName: string): boolean {
-  const normalized = modelName.toLowerCase();
-  return normalized.includes('3.1')
-    || normalized.includes('3-pro')
-    || normalized.includes('pro-image')
-    || normalized.includes('imagen-4');
+function resolveModernGeminiImageSize(request: GenerateRequest): '512' | '1K' | '2K' | '4K' | undefined {
+  const selected = request.extra_params?.resolutionType ?? request.size;
+  if (typeof selected === 'string') {
+    const normalized = selected.trim().toLowerCase();
+    if (/^(0\.5k|512|512px)$/.test(normalized)) return '512';
+  }
+  return resolveModernImageTier(request);
+}
+
+function endpointLooksLikeChatCompletions(cfg: CustomProviderConfig): boolean {
+  try {
+    const path = new URL(resolveEndpointUrlForRequest(cfg, 'model', {
+      prompt: '',
+      model: 'model',
+      size: '2K',
+      aspect_ratio: '1:1',
+    })).pathname;
+    return path.toLowerCase().includes('/chat/completions');
+  } catch {
+    return (cfg.endpointPath ?? '').toLowerCase().includes('/chat/completions');
+  }
+}
+
+function buildChatImageContent(request: GenerateRequest): string | Array<Record<string, unknown>> {
+  const referenceImages = request.reference_images ?? [];
+  if (referenceImages.length === 0) return request.prompt;
+  return [
+    { type: 'text', text: request.prompt },
+    ...referenceImages.map((imageUrl) => ({
+      type: 'image_url',
+      image_url: { url: imageUrl },
+    })),
+  ];
+}
+
+function buildOpenAiCompatibleChatImageBody(
+  modelName: string,
+  request: GenerateRequest,
+  options: {
+    defaultRequestParams: Record<string, unknown>;
+    userExtra: Record<string, unknown>;
+    size?: string;
+    ratio?: string;
+  },
+): Record<string, unknown> {
+  return compactRecord({
+    model: modelName,
+    messages: [{ role: 'user', content: buildChatImageContent(request) }],
+    modalities: ['image', 'text'],
+    ...(options.size ? { size: options.size } : {}),
+    n: 1,
+    ...options.defaultRequestParams,
+    ...(options.ratio ? { aspect_ratio: options.ratio } : {}),
+    ...options.userExtra,
+  });
 }
 
 function sanitizeAgnesImageTopLevelParams(params: Record<string, unknown>): Record<string, unknown> {
@@ -613,6 +662,36 @@ function resolveAgnesImageSize(cfg: CustomProviderConfig, request: GenerateReque
   const configuredSizes = (cfg.supportedResolutions ?? []).filter(isPixelSize).map((size) => size.trim());
   return pickClosestPixelSize(configuredSizes, request.aspect_ratio)
     ?? fallbackPixelSizeForAspectRatio(request.aspect_ratio);
+}
+
+function resolveFalImageSize(cfg: CustomProviderConfig, request: GenerateRequest): string | { width: number; height: number } {
+  const explicit = request.extra_params?.image_size ?? request.extra_params?.imageSize;
+  if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
+  if (explicit && typeof explicit === 'object' && !Array.isArray(explicit)) {
+    return explicit as { width: number; height: number };
+  }
+
+  const directPixelSize =
+    parsePixelSizeDimensions(request.extra_params?.resolutionType)
+    ?? parsePixelSizeDimensions(request.size);
+  if (directPixelSize) return directPixelSize;
+
+  switch (normalizeRatioKey(request.aspect_ratio)) {
+    case '16:9':
+      return 'landscape_16_9';
+    case '9:16':
+      return 'portrait_16_9';
+    case '4:3':
+      return 'landscape_4_3';
+    case '3:4':
+      return 'portrait_4_3';
+    case '1:1':
+      return 'square_hd';
+    default: {
+      const fallback = resolveModernOpenAiSize(cfg, request);
+      return parsePixelSizeDimensions(fallback) ?? 'square_hd';
+    }
+  }
 }
 
 function buildAgnesImageRequestBody(
@@ -712,13 +791,8 @@ function buildModernRequestBody(
       .filter((part): part is Record<string, unknown> => Boolean(part));
     const imageConfig = compactRecord({
       aspectRatio: resolveModernRatioForPrompt(request),
-      imageSize: modelLooksLikeGeminiHighResImageModel(modelName)
-        ? resolveModernImageTier(request)
-        : undefined,
+      imageSize: resolveModernGeminiImageSize(request),
     });
-    const responseFormat = Object.keys(imageConfig).length > 0
-      ? { image: imageConfig }
-      : undefined;
     return {
       contents: [
         {
@@ -731,13 +805,30 @@ function buildModernRequestBody(
       ],
       generationConfig: compactRecord({
         responseModalities: ['TEXT', 'IMAGE'],
-        responseFormat,
+        imageConfig: Object.keys(imageConfig).length > 0 ? imageConfig : undefined,
       }),
     };
   }
 
+  if (kind === 'openai-chat-image') {
+    return buildOpenAiCompatibleChatImageBody(modelName, request, {
+      defaultRequestParams,
+      userExtra,
+      size: resolveModernOpenAiSize(cfg, request),
+      ratio: resolveModernRatioForPrompt(request),
+    });
+  }
+
   if (kind === 'openai-images' || kind === 'midjourney') {
     const size = resolveModernOpenAiSize(cfg, request);
+    if (endpointLooksLikeChatCompletions(cfg)) {
+      return buildOpenAiCompatibleChatImageBody(modelName, request, {
+        defaultRequestParams,
+        userExtra,
+        size,
+        ratio: resolveModernRatioForPrompt(request),
+      });
+    }
     return compactRecord({
       model: modelName,
       prompt: request.prompt,
@@ -748,6 +839,16 @@ function buildModernRequestBody(
     });
   }
 
+  if (kind === 'stability') {
+    return compactRecord({
+      prompt: request.prompt,
+      aspect_ratio: resolveModernRatioForPrompt(request),
+      output_format: 'png',
+      ...defaultRequestParams,
+      ...userExtra,
+    });
+  }
+
   if (kind === 'agnes-images') {
     return buildAgnesImageRequestBody(cfg, modelName, request, userExtra);
   }
@@ -755,7 +856,7 @@ function buildModernRequestBody(
   if (kind === 'fal') {
     return compactRecord({
       prompt: request.prompt,
-      image_size: resolveModernOpenAiSize(cfg, request),
+      image_size: resolveFalImageSize(cfg, request),
       num_images: 1,
       ...defaultRequestParams,
       ...userExtra,
@@ -764,13 +865,27 @@ function buildModernRequestBody(
   }
 
   if (kind === 'replicate') {
+    const topLevelDefaults = { ...defaultRequestParams };
+    const defaultInput = asPlainRecord(topLevelDefaults.input) ?? {};
+    const version =
+      userExtra.version
+      ?? userExtra.model
+      ?? topLevelDefaults.version
+      ?? topLevelDefaults.model
+      ?? modelName;
+    delete userExtra.version;
+    delete userExtra.model;
+    delete topLevelDefaults.version;
+    delete topLevelDefaults.model;
+    delete topLevelDefaults.input;
     return {
-      ...defaultRequestParams,
+      ...topLevelDefaults,
+      version,
       input: {
         prompt: request.prompt,
         aspect_ratio: request.aspect_ratio,
         ...(request.reference_images?.[0] ? { image: request.reference_images[0] } : {}),
-        ...(asPlainRecord(defaultRequestParams.input) ?? {}),
+        ...defaultInput,
         ...userExtra,
       },
     };
@@ -838,27 +953,17 @@ function buildRequestBody(
         };
       }
       if (isChatCompletionsEndpoint(cfg)) {
-        const referenceImages = request.reference_images ?? [];
-        const content = referenceImages.length > 0
-          ? [
-            { type: 'text', text: request.prompt },
-            ...referenceImages.map((imageUrl) => ({
-              type: 'image_url',
-              image_url: { url: imageUrl },
-            })),
-          ]
-          : request.prompt;
-        return {
-          model: modelName,
-          messages: [{ role: 'user', content }],
-          modalities: ['image', 'text'],
-          ...normalizedDefaultRequestParams,
-          ...(ratio ? { aspect_ratio: ratio } : {}),
-          ...webSearchField,
-          ...negativeField,
-          ...seedField,
-          ...userExtra,
-        };
+        return buildOpenAiCompatibleChatImageBody(modelName, request, {
+          defaultRequestParams: {
+            ...normalizedDefaultRequestParams,
+            ...webSearchField,
+            ...negativeField,
+            ...seedField,
+          },
+          userExtra,
+          size: resolvedSize,
+          ratio,
+        });
       }
       // OpenAI Images-ish: POST { model, prompt, size, n, ... }. We keep it
       // minimal so most aggregators accept it.
@@ -946,6 +1051,17 @@ function parseAspectRatioValue(value: string | undefined): number {
 function parsePixelSizeRatio(value: string): number | null {
   const [w, h] = value.toLowerCase().split('x').map((part) => Number(part));
   return Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0 ? w / h : null;
+}
+
+function parsePixelSizeDimensions(value: unknown): { width: number; height: number } | null {
+  if (typeof value !== 'string') return null;
+  const match = /^(\d{2,5})x(\d{2,5})$/i.exec(value.trim());
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  return Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0
+    ? { width, height }
+    : null;
 }
 
 function pickClosestPixelSize(candidates: string[], aspectRatio: string | undefined): string | null {
@@ -1228,6 +1344,9 @@ function buildRequestHeaders(
   } else if (method === 'POST' && bodyMode === 'form-urlencoded') {
     headers['Content-Type'] = 'application/x-www-form-urlencoded';
   }
+  if (method === 'POST' && cfg.apiStyle === 'stability') {
+    headers.Accept = 'application/json';
+  }
 
   Object.entries(cfg.extraHeaders ?? {}).forEach(([key, value]) => {
     const normalizedKey = key.trim();
@@ -1404,6 +1523,9 @@ function resolveModernProviderBodyMode(
   request: GenerateRequest,
 ): CustomProviderBodyMode | null {
   if (!isModernProviderConfig(cfg)) return null;
+  if (isOpenAiImagesLikeModernProvider(cfg) && endpointLooksLikeChatCompletions(cfg)) {
+    return 'json';
+  }
   if (
     isOpenAiImagesLikeModernProvider(cfg)
     && (request.reference_images?.length ?? 0) > 0
@@ -1447,7 +1569,11 @@ function resolveEndpointUrlForRequest(
   const configuredPath = (modernPath ?? cfg.endpointPath ?? '').trim();
   const joined = configuredPath
     ? buildProviderUrl(base, configuredPath)
-    : guessDefaultPath(cfg.apiStyle, base);
+    : (
+      shouldAppendFalModelEndpoint(cfg, base)
+        ? buildProviderUrl(base, `/${modelName}`)
+        : guessDefaultPath(cfg.apiStyle, base)
+    );
   const withModel = joined
     .replace(/\{model\}/g, encodeURIComponent(modelName))
     .replace(/\{modelId\}/g, encodeURIComponent(modelName));
@@ -1455,6 +1581,17 @@ function resolveEndpointUrlForRequest(
     ...(cfg.queryParams ?? {}),
     ...(dynamicQueryParams ?? {}),
   });
+}
+
+function shouldAppendFalModelEndpoint(cfg: CustomProviderConfig, normalizedBaseUrl: string): boolean {
+  if (cfg.apiStyle !== 'fal') return false;
+  try {
+    const parsed = new URL(normalizedBaseUrl);
+    const path = parsed.pathname.replace(/\/+$/, '');
+    return path === '' || path === '/';
+  } catch {
+    return false;
+  }
 }
 
 function appendQueryParams(url: string, queryParams: Record<string, string>): string {
@@ -3556,7 +3693,25 @@ function extractTaskId(payload: unknown): string | null {
 
 function resolveAsyncTaskConfig(cfg: CustomProviderConfig): AsyncTaskConfig | null {
   const raw = cfg.extraParams?.asyncTask;
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    if (isModernProviderConfig(cfg) && modernProviderKind(cfg) === 'replicate') {
+      return {
+        resultEndpointPath: '/predictions/{taskId}',
+        resultMethod: 'GET',
+        taskIdPath: 'id',
+        imagePath: 'output[0]',
+        statusPath: 'status',
+        pendingValues: ['starting', 'processing', 'queued'],
+        successValues: ['succeeded', 'successful', 'success', 'completed'],
+        failedValues: ['failed', 'canceled', 'cancelled', 'error'],
+        errorPath: 'error',
+        requestBody: undefined,
+        intervalMs: 2000,
+        timeoutMs: 180000,
+      };
+    }
+    return null;
+  }
   const record = raw as Record<string, unknown>;
   if (record.enabled === false) return null;
   const resultEndpointPath = typeof record.resultEndpointPath === 'string' ? record.resultEndpointPath.trim() : '';

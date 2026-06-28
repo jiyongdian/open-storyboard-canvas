@@ -25,6 +25,7 @@ import {
 
 type ModernProviderKind =
   | 'openai-images'
+  | 'openai-chat-image'
   | 'openai-responses'
   | 'google-gemini'
   | 'stability'
@@ -49,6 +50,8 @@ interface ModernProviderTemplate {
   supportedModelVersions?: string[];
   supportsWebSearch?: boolean;
   note: string;
+  extraHeaders?: Record<string, string>;
+  extraParams?: Record<string, unknown>;
   defaultRequestParams?: Record<string, unknown>;
   responseImagePath?: string;
 }
@@ -68,23 +71,24 @@ const COMMON_RATIOS = [
 ];
 
 const TIER_RESOLUTIONS = ['1k', '2k', '4k'];
+const GEMINI_TIER_RESOLUTIONS = ['512', '1K', '2K', '4K'];
 
 const GEMINI_RATIOS = [
   'auto',
   '1:1',
-  '16:9',
-  '9:16',
-  '4:3',
-  '3:4',
-  '3:2',
+  '1:4',
+  '1:8',
   '2:3',
+  '3:2',
+  '3:4',
+  '4:1',
+  '4:3',
   '4:5',
   '5:4',
-  '21:9',
-  '2:1',
-  '4:1',
-  '1:4',
   '8:1',
+  '9:16',
+  '16:9',
+  '21:9',
 ];
 
 const OPENAI_PIXEL_SIZES = [
@@ -156,6 +160,45 @@ const MODERN_PROVIDER_TEMPLATES: ModernProviderTemplate[] = [
     note: '新接入会按 Images API 发送 model、prompt、size、n、quality、output_format；不会把 aspect_ratio、resolutionType 等内部字段发给上游。Base URL 只填基础域名即可，/v1 已写在路径里；gpt-image-2 / codex-gpt-image-2 等以你的供应商实际支持为准。',
   },
   {
+    kind: 'openai-chat-image',
+    title: 'Chat Completions 图像',
+    subtitle: '走 /v1/chat/completions 的生图中转站，支持文本和参考图',
+    defaultLabel: 'Chat Completions 图像',
+    defaultBaseUrl: 'https://api.example.com',
+    endpointPath: '/v1/chat/completions',
+    modelListEndpointPath: '/v1/models',
+    apiStyle: 'openai-compatible',
+    responseFormat: 'generic',
+    models: [
+      'gpt-image-2',
+      'codex-gpt-image-2',
+      'gpt-image-1.5',
+      'google/gemini-3-pro-image-preview',
+      'google/gemini-2.5-flash-image',
+      'google/gemini-3.1-flash-image',
+      'gemini-2.5-flash-image-preview',
+      'gemini-3.1-flash-image',
+      'nano-banana-pro',
+      'nano-banana-2',
+      'nano-banana',
+      'openai/gpt-image-1',
+    ],
+    modelDescriptions: {
+      'gpt-image-2': 'Chat Completions 中转站常见 GPT 图像模型',
+      'codex-gpt-image-2': '部分中转站常见 GPT 图像别名',
+      'google/gemini-3-pro-image-preview': 'Google Gemini 图像模型的中转站写法',
+      'google/gemini-2.5-flash-image': 'Google Gemini Flash 图像模型的中转站写法',
+      'nano-banana-pro': 'Google 高质量图像模型常见别名',
+    },
+    supportedRatios: COMMON_RATIOS,
+    supportedResolutions: OPENAI_PIXEL_SIZES,
+    responseImagePath: 'choices[0].message.content',
+    defaultRequestParams: {
+      modalities: ['image', 'text'],
+    },
+    note: '适合把图像生成包装成 /v1/chat/completions 的中转站；请求会发送 messages，参考图会放入 content 的 image_url，不会走 multipart。',
+  },
+  {
     kind: 'openai-responses',
     title: 'OpenAI Responses 图像工具',
     subtitle: 'Responses API + image_generation 工具，适合支持工具调用的模型',
@@ -224,9 +267,9 @@ const MODERN_PROVIDER_TEMPLATES: ModernProviderTemplate[] = [
       'imagen-4.0-fast-generate-001': 'Imagen 4 快速生成模型',
     },
     supportedRatios: GEMINI_RATIOS,
-    supportedResolutions: ['auto', '512', ...TIER_RESOLUTIONS, '1024x1024', '1536x1024', '1024x1536', '2048x2048'],
+    supportedResolutions: ['auto', ...GEMINI_TIER_RESOLUTIONS],
     responseImagePath: 'candidates[0].content.parts[0].inline_data.data',
-    note: '直连 Gemini 时会使用 x-goog-api-key，并按 generateContent 组装 contents；如果你的站点已做 OpenAI 兼容，建议选 OpenAI Images 兼容。',
+    note: '直连 Gemini 时会使用 x-goog-api-key，并按 generateContent 组装 contents；比例和清晰度会写入 generationConfig.imageConfig.aspectRatio / imageSize，imageSize 使用 512、1K、2K、4K 且 K 必须大写。若你的站点已做 OpenAI 兼容，建议选 OpenAI Images 兼容。',
   },
   {
     kind: 'stability',
@@ -254,8 +297,12 @@ const MODERN_PROVIDER_TEMPLATES: ModernProviderTemplate[] = [
       'sd3.5-large-turbo': 'Stable Diffusion 3.5 快速版本',
       'sd3-large': 'Stable Diffusion 3 Large',
     },
-    supportedRatios: ['auto', '1:1', '16:9', '9:16', '3:2', '2:3', '4:5', '5:4'],
-    supportedResolutions: ['auto', ...TIER_RESOLUTIONS],
+    supportedRatios: ['auto', '1:1', '16:9', '9:16', '21:9', '9:21', '3:2', '2:3', '4:5', '5:4'],
+    supportedResolutions: ['auto'],
+    defaultRequestParams: {
+      output_format: 'png',
+    },
+    responseImagePath: 'image',
     note: '适合 Stability 官方常见接口；如遇签名或二进制返回限制，建议走代理后再用 OpenAI 兼容路线。',
   },
   {
@@ -352,6 +399,26 @@ const MODERN_PROVIDER_TEMPLATES: ModernProviderTemplate[] = [
     },
     supportedRatios: COMMON_RATIOS,
     supportedResolutions: ['auto', ...TIER_RESOLUTIONS, '1024x1024', '1536x1024', '1024x1536'],
+    extraHeaders: {
+      Prefer: 'wait=60',
+    },
+    responseImagePath: 'output[0]',
+    extraParams: {
+      asyncTask: {
+        enabled: true,
+        taskIdPath: 'id',
+        resultEndpointPath: '/predictions/{taskId}',
+        resultMethod: 'GET',
+        imagePath: 'output[0]',
+        statusPath: 'status',
+        pendingValues: ['starting', 'processing', 'queued'],
+        successValues: ['succeeded', 'successful', 'success', 'completed'],
+        failedValues: ['failed', 'canceled', 'cancelled', 'error'],
+        errorPath: 'error',
+        intervalMs: 2000,
+        timeoutMs: 180000,
+      },
+    },
     defaultRequestParams: {
       input: {},
     },
@@ -620,12 +687,13 @@ export const ModernProvidersSection = memo(function ModernProvidersSection() {
       apiStyle: template.apiStyle,
       models: cleanModels.length > 0 ? cleanModels : template.models,
       supportsWebSearch: Boolean(template.supportsWebSearch),
-      extraHeaders: {},
+      extraHeaders: template.extraHeaders ?? {},
       queryParams: {},
       responseFormat: template.responseFormat,
       supportedResolutions: selectedResolutions,
       supportedModelVersions: template.supportedModelVersions,
       extraParams: {
+        ...(template.extraParams ?? {}),
         providerConfigVersion: 'new-v1',
         mediaType: 'image',
         providerKind: template.kind,
