@@ -83,6 +83,9 @@ enum RemoteMediaAttemptFailure {
     Network {
         message: String,
     },
+    InvalidContent {
+        message: String,
+    },
 }
 
 fn describe_remote_media_url(url: &str) -> String {
@@ -196,6 +199,15 @@ async fn try_remote_media_request(
         })?
         .to_vec();
 
+    if let Some(message) = remote_media_content_error(media_kind, &content_type, &bytes) {
+        return Err(RemoteMediaAttemptFailure::InvalidContent {
+            message: format!(
+                "{} route attempt {} returned invalid remote {} content for {}: {}",
+                route_label, attempt, media_kind, url_label, message
+            ),
+        });
+    }
+
     Ok(RemoteMediaDownload {
         bytes,
         content_type,
@@ -248,6 +260,11 @@ async fn download_remote_media_bytes(
             Err(RemoteMediaAttemptFailure::Network { message }) => {
                 should_try_no_proxy = true;
                 default_error = message;
+            }
+            Err(RemoteMediaAttemptFailure::InvalidContent { message }) => {
+                should_try_no_proxy = true;
+                default_error = message;
+                break;
             }
         }
 
@@ -303,6 +320,10 @@ async fn download_remote_media_bytes(
             }
             Err(RemoteMediaAttemptFailure::Network { message }) => {
                 no_proxy_error = message;
+            }
+            Err(RemoteMediaAttemptFailure::InvalidContent { message }) => {
+                no_proxy_error = message;
+                break;
             }
         }
 
@@ -2111,6 +2132,30 @@ fn content_type_is_textual_non_image(content_type: &str) -> bool {
         || primary.starts_with("text/")
 }
 
+fn remote_media_content_error(
+    media_kind: &str,
+    content_type: &str,
+    bytes: &[u8],
+) -> Option<String> {
+    if media_kind == "image" && extract_wrapped_image_source_from_bytes(bytes).is_some() {
+        return None;
+    }
+    let textual_preview = bytes_text_preview(bytes, 120);
+    let is_textual_error = content_type_is_textual_non_image(content_type)
+        || textual_preview
+            .as_deref()
+            .map(|preview| looks_like_json_text(preview) || looks_like_html_text(preview))
+            .unwrap_or(false);
+    if !is_textual_error {
+        return None;
+    }
+    Some(match media_kind {
+        "video" => describe_non_video_remote_body(content_type, bytes),
+        "audio" => describe_non_audio_remote_body(content_type, bytes),
+        _ => describe_non_image_remote_body(content_type, bytes),
+    })
+}
+
 fn describe_non_image_remote_body(content_type: &str, bytes: &[u8]) -> String {
     let preview = bytes_text_preview(bytes, 360)
         .unwrap_or_else(|| format!("{} bytes, binary preview unavailable", bytes.len()));
@@ -2275,7 +2320,13 @@ async fn resolve_audio_source_bytes(source: &str) -> Result<(Vec<u8>, String), S
 
 fn is_likely_non_image_result_key(key_path: &str) -> bool {
     let key = key_path.to_ascii_lowercase();
-    key.contains("status_url")
+    key.contains("page_url")
+        || key.contains("pageurl")
+        || key.contains("web_url")
+        || key.contains("weburl")
+        || key.contains("request_url")
+        || key.contains("requesturl")
+        || key.contains("status_url")
         || key.contains("statusurl")
         || key.contains("poll_url")
         || key.contains("pollurl")
@@ -3214,4 +3265,57 @@ pub async fn load_image(file_path: String) -> Result<String, String> {
     };
 
     Ok(format!("data:{};base64,{}", mime, base64_data))
+}
+
+#[cfg(test)]
+mod remote_media_tests {
+    use super::remote_media_content_error;
+
+    #[test]
+    fn html_success_body_is_rejected_before_route_is_accepted() {
+        let error = remote_media_content_error(
+            "image",
+            "text/html; charset=utf-8",
+            b"<!doctype html><html><body>proxy error</body></html>",
+        );
+        assert!(error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("did not return image bytes"));
+    }
+
+    #[test]
+    fn image_content_is_allowed() {
+        assert!(remote_media_content_error("image", "image/png", b"\x89PNG\r\n\x1a\n",).is_none());
+    }
+
+    #[test]
+    fn json_wrapper_is_allowed_for_outer_image_source_unwrap() {
+        assert!(remote_media_content_error(
+            "image",
+            "application/json",
+            br#"{"url":"https://cdn.example.com/result.png"}"#,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn json_error_without_image_source_is_rejected() {
+        assert!(remote_media_content_error(
+            "image",
+            "application/json",
+            br#"{"error":{"message":"upstream unavailable"}}"#,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn json_page_url_is_not_treated_as_an_image_wrapper() {
+        assert!(remote_media_content_error(
+            "image",
+            "application/json",
+            br#"{"page_url":"https://example.com/results/123"}"#,
+        )
+        .is_some());
+    }
 }

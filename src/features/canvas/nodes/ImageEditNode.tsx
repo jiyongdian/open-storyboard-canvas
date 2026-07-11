@@ -49,6 +49,7 @@ import {
 } from '@/features/canvas/application/imageData';
 import { resolveClipboardImageFile } from '@/features/canvas/hooks/useCanvasShortcuts';
 import { appendGenerationParameterConstraints } from '@/features/canvas/application/generationPromptConstraints';
+import { normalizeImageRequestGeometry } from '@/features/canvas/application/imageRequestGeometry';
 import {
   acquireGenerationSubmitLock,
   generationSubmitLockKey,
@@ -680,24 +681,17 @@ export const ImageEditNode = memo(({ id, data, selected, width, height }: ImageE
     setError(null);
     setShowCountPicker(false);
 
-    // Aspect ratio: honour the picker's choice directly. "auto" falls back to
-    // the source image's ratio (or 1:1 if none), and for custom/Dreamina we
-    // just pass it through — adapters handle 'auto' themselves.
-    let resolvedRequestAspectRatio = resolved.ratio;
-    if (resolvedRequestAspectRatio === 'auto') {
+    let referenceAspectRatio: string | undefined;
+    if (resolved.ratio === 'auto') {
       if (latestIncomingImages.length > 0) {
         try {
-          const sourceAspectRatio = await detectAspectRatio(latestIncomingImages[0]);
-          resolvedRequestAspectRatio = sourceAspectRatio;
+          referenceAspectRatio = await detectAspectRatio(latestIncomingImages[0]);
         } catch {
-          resolvedRequestAspectRatio = '1:1';
+          referenceAspectRatio = undefined;
         }
-      } else {
-        resolvedRequestAspectRatio = '1:1';
       }
     }
 
-    const requestSize = '2K';
     const effectiveExtraParamsRecord = effectiveExtraParams as Record<string, unknown>;
     const requestResolutionLabel =
       resolved.extraParams?.['resolutionType'] ??
@@ -705,18 +699,31 @@ export const ImageEditNode = memo(({ id, data, selected, width, height }: ImageE
       effectiveExtraParamsRecord['resolutionType'] ??
       effectiveExtraParamsRecord['size'] ??
       selectedResolution.value ??
-      requestSize;
+      '2K';
+    const geometry = normalizeImageRequestGeometry({
+      selectedResolution: requestResolutionLabel,
+      selectedAspectRatio: resolved.ratio,
+      referenceAspectRatio,
+      supportedAspectRatios: resolved.supportedRatios,
+      fallbackResolution: '2K',
+    });
+    const requestSize = geometry.requestSize;
+    const resolvedRequestAspectRatio = geometry.requestAspectRatio;
     const promptWithReferenceContext = referenceContextPrompt
       ? `${referenceContextPrompt}\n\n${prompt}`
       : prompt;
     const promptForRequest = appendGenerationParameterConstraints(promptWithReferenceContext, {
       enabled: latestSettings.appendParameterConstraintsToPrompt,
-      aspectRatio: resolvedRequestAspectRatio,
-      resolution: requestResolutionLabel,
+      aspectRatio: geometry.promptAspectRatio,
+      resolution: geometry.resolutionLabel,
       count: effectiveCount,
     });
 
-    const extraParams = { ...effectiveExtraParams, ...resolved.extraParams };
+    const extraParams = {
+      ...effectiveExtraParams,
+      ...resolved.extraParams,
+      resolutionType: geometry.resolutionLabel,
+    };
     return {
       promptForRequest,
       requestSize,

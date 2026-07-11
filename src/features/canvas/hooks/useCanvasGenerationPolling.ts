@@ -3,7 +3,11 @@ import { useTranslation } from 'react-i18next';
 
 import { useCanvasStore, type CanvasNode, type CanvasNodeData } from '@/stores/canvasStore';
 import { CANVAS_NODE_TYPES } from '@/features/canvas/domain/canvasNodes';
-import { canvasAiGateway, canvasVideoGateway } from '@/features/canvas/application/canvasServices';
+import {
+  canvasAiGateway,
+  canvasVideoGateway,
+  materializeProviderAwareImageResult,
+} from '@/features/canvas/application/canvasServices';
 import { prepareNodeImage } from '@/features/canvas/application/imageData';
 import {
   buildGenerationErrorReport,
@@ -244,7 +248,13 @@ async function prepareCompletedImageResult(
   let lastPrepareError: unknown = null;
   for (let attempt = 0; attempt < PREPARE_IMAGE_MAX_ATTEMPTS; attempt += 1) {
     try {
-      prepared = await prepareNodeImage(resultUrl);
+      const providerId = typeof currentData.generationProviderId === 'string'
+        ? currentData.generationProviderId.trim()
+        : '';
+      const materializedSource = providerId
+        ? await materializeProviderAwareImageResult(providerId, resultUrl)
+        : resultUrl;
+      prepared = await prepareNodeImage(materializedSource);
       lastPrepareError = null;
       break;
     } catch (error) {
@@ -772,7 +782,6 @@ function markGenerationFailed(
   if (options?.preserveRetryMetadata) {
     if (options.clearJobMetadata) {
       patch.generationJobId = null;
-      patch.generationProviderId = null;
       patch.generationClientSessionId = null;
     }
     const retryResultUrl = typeof options.retryResultUrl === 'string'

@@ -22,6 +22,13 @@ import { useSettingsStore } from '@/stores/settingsStore';
 import { hasCustomProviderCredential } from '@/features/canvas/application/providerAvailability';
 import { isLocalFilesystemResultSource } from '@/features/canvas/application/generationRetry';
 import {
+  parseCustomProviderModelId,
+  redactSensitiveUrl,
+  resolveGenerationSubmissionRetryAttempts,
+  selectImageResultCandidate,
+  shouldForwardProviderCredentials,
+} from '@/features/canvas/application/imageProviderContracts';
+import {
   buildProviderUrl,
   ensureProviderBaseUrlDirectory,
   normalizeProviderBaseUrl,
@@ -76,11 +83,13 @@ const cache = new Map<string, CachedJob>();
 const POLL_TIMEOUT_MS = 120000;
 const VIDEO_POLL_TIMEOUT_MS = 15 * 60 * 1000;
 const CONNECTIVITY_TEST_POLL_TIMEOUT_MS = 180000;
-const GENERATION_REQUEST_TIMEOUT_MS = 180000;
+const GENERATION_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+const MODERN_IMAGE_GENERATION_REQUEST_TIMEOUT_MS = 9 * 60 * 1000;
+const MAX_IMAGE_GENERATION_REQUEST_TIMEOUT_MS = 9 * 60 * 1000;
 const CHAT_COMPLETION_REQUEST_TIMEOUT_MS = 30 * 60 * 1000;
-const GENERATION_SUBMIT_NETWORK_RETRY_ATTEMPTS = 2;
-const GENERATION_SUBMIT_NETWORK_RETRY_DELAY_MS = 700;
-const GENERATION_SUBMIT_NETWORK_ERROR_PREFIX = '提交阶段网络请求失败';
+const VIDEO_SUBMIT_NETWORK_RETRY_ATTEMPTS = 2;
+const VIDEO_SUBMIT_NETWORK_RETRY_DELAY_MS = 700;
+const GENERATION_SUBMIT_NETWORK_ERROR_PREFIX = '提交结果未知，上游可能已接受请求；为避免重复计费未自动重试';
 const RESULT_POLL_INTERVAL_MS = 1000;
 const RESULT_POLL_REQUEST_TIMEOUT_MS = 30000;
 const RESULT_POLL_NETWORK_RETRY_ATTEMPTS = 3;
@@ -337,14 +346,22 @@ function resolveProviderAndModel(modelId: string): { cfg: CustomProviderConfig; 
     return { cfg: buildAgnesProviderConfig(mediaType, apiKey), model };
   }
 
-  // modelId shape: `custom:<providerId>:<modelId>`
-  const parts = modelId.split(':');
-  if (parts.length < 3 || parts[0] !== 'custom') return null;
-  const providerId = parts[1];
-  const modelName = parts.slice(2).join(':');
-  const cfg = useCustomProvidersStore.getState().providers.find((p) => p.id === providerId);
+  const parsed = parseCustomProviderModelId(modelId);
+  if (!parsed) return null;
+  const cfg = useCustomProvidersStore.getState().providers.find((p) => p.id === parsed.providerId);
   if (!cfg) return null;
-  return { cfg, model: modelName };
+  return { cfg, model: parsed.upstreamModel };
+}
+
+function resolveGenerationRequestTimeoutMs(cfg: CustomProviderConfig): number {
+  const raw = cfg.extraParams?.generationTimeoutMs ?? cfg.extraParams?.timeoutMs;
+  const configured = Number(raw);
+  if (Number.isFinite(configured) && configured > 0) {
+    return Math.min(MAX_IMAGE_GENERATION_REQUEST_TIMEOUT_MS, Math.max(30_000, Math.floor(configured)));
+  }
+  return isModernProviderConfig(cfg)
+    ? MODERN_IMAGE_GENERATION_REQUEST_TIMEOUT_MS
+    : GENERATION_REQUEST_TIMEOUT_MS;
 }
 
 function isModernProviderConfig(cfg: CustomProviderConfig): boolean {
@@ -577,19 +594,23 @@ function buildOpenAiCompatibleChatImageBody(
   },
 ): Record<string, unknown> {
   return compactRecord({
+    ...options.defaultRequestParams,
+    ...(options.ratio ? { aspect_ratio: options.ratio } : {}),
+    ...options.userExtra,
     model: modelName,
     messages: [{ role: 'user', content: buildChatImageContent(request) }],
     modalities: ['image', 'text'],
     ...(options.size ? { size: options.size } : {}),
     n: 1,
-    ...options.defaultRequestParams,
-    ...(options.ratio ? { aspect_ratio: options.ratio } : {}),
-    ...options.userExtra,
   });
 }
 
 function sanitizeAgnesImageTopLevelParams(params: Record<string, unknown>): Record<string, unknown> {
   const sanitized = { ...params };
+  delete sanitized.model;
+  delete sanitized.prompt;
+  delete sanitized.size;
+  delete sanitized.n;
   delete sanitized.image;
   delete sanitized.images;
   delete sanitized.reference_images;
@@ -718,10 +739,6 @@ function buildAgnesImageRequestBody(
   const explicitTags = topLevelUserExtra.tags ?? topLevelDefaults.tags;
 
   return compactRecord({
-    model: modelName,
-    prompt: request.prompt,
-    size,
-    n: 1,
     ...(referenceImages.length > 0 && explicitTags === undefined ? { tags: ['img2img'] } : {}),
     ...topLevelDefaults,
     ...topLevelUserExtra,
@@ -740,6 +757,10 @@ function buildAgnesImageRequestBody(
           ? { extra_body: compactRecord({ ...defaultExtraBody, ...userExtraBody }) }
           : {}),
       }),
+    model: modelName,
+    prompt: request.prompt,
+    size,
+    n: 1,
   });
 }
 
@@ -892,11 +913,11 @@ function buildModernRequestBody(
   }
 
   return compactRecord({
+    ...defaultRequestParams,
+    ...userExtra,
     model: modelName,
     prompt: request.prompt,
     size: resolveModernOpenAiSize(cfg, request),
-    ...defaultRequestParams,
-    ...userExtra,
   });
 }
 
@@ -941,15 +962,15 @@ function buildRequestBody(
     case 'openai-compatible': {
       if (isResponsesEndpoint(cfg)) {
         return {
-          model: modelName,
-          input: request.prompt,
-          tools: [{ type: 'image_generation' }],
           ...normalizedDefaultRequestParams,
-          ...(ratio ? { aspect_ratio: ratio } : {}),
           ...webSearchField,
           ...negativeField,
           ...seedField,
           ...userExtra,
+          model: modelName,
+          input: request.prompt,
+          tools: [{ type: 'image_generation' }],
+          ...(ratio ? { aspect_ratio: ratio } : {}),
         };
       }
       if (isChatCompletionsEndpoint(cfg)) {
@@ -968,19 +989,19 @@ function buildRequestBody(
       // OpenAI Images-ish: POST { model, prompt, size, n, ... }. We keep it
       // minimal so most aggregators accept it.
       return {
-        model: modelName,
-        prompt: request.prompt,
-        size: resolvedSize,
-        n: 1,
         ...normalizedDefaultRequestParams,
-        ...(ratio ? { aspect_ratio: ratio } : {}),
-        ...(request.reference_images && request.reference_images.length > 0
-          ? { image: request.reference_images[0] }
-          : {}),
         ...webSearchField,
         ...negativeField,
         ...seedField,
         ...userExtra,
+        model: modelName,
+        prompt: request.prompt,
+        size: resolvedSize,
+        n: 1,
+        ...(ratio ? { aspect_ratio: ratio } : {}),
+        ...(request.reference_images && request.reference_images.length > 0
+          ? { image: request.reference_images[0] }
+          : {}),
       };
     }
     default:
@@ -1261,6 +1282,21 @@ function applyRequestBodyHints(
   return next;
 }
 
+function ensureOpenAiImageModelBinding(
+  cfg: CustomProviderConfig,
+  body: Record<string, unknown>,
+  modelName: string,
+): Record<string, unknown> {
+  if (cfg.apiStyle !== 'openai-compatible') return body;
+  const hints = asPlainRecord(cfg.extraParams?.requestBodyHints);
+  const configuredField = typeof hints?.modelField === 'string' ? hints.modelField.trim() : '';
+  const boundValue = configuredField ? getValueByPath(body, configuredField) : body.model;
+  if (typeof boundValue === 'string' && boundValue.trim()) return body;
+  const next = { ...body };
+  setBodyValue(next, configuredField || 'model', modelName);
+  return next;
+}
+
 function resolveHintedSizeValue(
   cfg: CustomProviderConfig,
   request: GenerateRequest,
@@ -1496,7 +1532,11 @@ function buildMultipartBody(
   if (!record) {
     throw new Error('multipart 请求体必须是对象，请检查默认请求参数和 requestBodyHints。');
   }
-  const hintedBody = applyRequestBodyHints(cfg, record, request, modelName);
+  const hintedBody = ensureOpenAiImageModelBinding(
+    cfg,
+    applyRequestBodyHints(cfg, record, request, modelName),
+    modelName,
+  );
   const hints = resolveRequestBodyHints(asPlainRecord(cfg.extraParams));
   const hintedReferenceField = typeof hints?.referenceImageField === 'string'
     ? hints.referenceImageField.trim()
@@ -1636,17 +1676,7 @@ function maskDebugHeaderValue(key: string, value: string): string {
 }
 
 function maskDebugUrl(rawUrl: string): string {
-  try {
-    const url = new URL(rawUrl);
-    url.searchParams.forEach((_value, key) => {
-      if (isSensitiveFieldName(key)) {
-        url.searchParams.set(key, '[masked]');
-      }
-    });
-    return url.toString();
-  } catch {
-    return rawUrl.replace(/([?&][^=&]*(?:key|token|secret|password)[^=]*=)[^&]+/gi, '$1[masked]');
-  }
+  return redactSensitiveUrl(rawUrl);
 }
 
 function summarizeDebugString(value: string, maxLength = 500): string {
@@ -1818,12 +1848,16 @@ function parseResponseText(text: string): unknown {
 }
 
 function previewPayload(payload: unknown): string {
-  if (typeof payload === 'string') return payload.slice(0, 300);
+  if (typeof payload === 'string') return redactSensitiveText(payload).slice(0, 300);
   try {
-    return (JSON.stringify(payload) ?? String(payload)).slice(0, 300);
+    return redactSensitiveText(JSON.stringify(payload) ?? String(payload)).slice(0, 300);
   } catch {
-    return String(payload).slice(0, 300);
+    return redactSensitiveText(String(payload)).slice(0, 300);
   }
+}
+
+function redactSensitiveText(value: string): string {
+  return value.replace(/https?:\/\/[^\s"'<>]+/gi, (url) => redactSensitiveUrl(url));
 }
 
 function previewJsonPayload(payload: unknown, maxLength = 1000): string {
@@ -2030,6 +2064,23 @@ function extractFirstImageUrl(cfg: CustomProviderConfig, payload: unknown): stri
   if (!Object.is(unwrappedPayload, payload)) {
     const unwrapped = extractFirstImageUrl(cfg, unwrappedPayload);
     if (unwrapped) return unwrapped;
+  }
+
+  const candidate = selectImageResultCandidate(
+    payload,
+    typeof cfg.extraParams?.responseImagePath === 'string'
+      ? cfg.extraParams.responseImagePath
+      : undefined,
+  );
+  if (candidate) {
+    const normalized = normalizeImageSourceForProvider(cfg, candidate.source);
+    console.info('[CustomProviderGeneration]', {
+      phase: 'parse:candidate-selected',
+      path: candidate.path,
+      confidence: candidate.confidence,
+      source: /^https?:\/\//i.test(normalized) ? redactSensitiveUrl(normalized) : resolveSourceKind(normalized),
+    });
+    return normalized;
   }
 
   const hinted = extractByPath(cfg, payload, cfg.extraParams?.responseImagePath);
@@ -2257,9 +2308,9 @@ function isProbablyImageSource(value: string, key: string): boolean {
 function isDefinitelyNonImageUrlPath(keyPath: string): boolean {
   if (!keyPath) return false;
   const normalized = keyPath.toLowerCase();
-  return /(^|[._-])(status|poll|callback|webhook|request|submit|queue|endpoint|response)[._-]?url($|[._-])/.test(normalized)
-    || /(^|[._-])url[._-]?(status|poll|callback|webhook|request|submit|queue|endpoint|response)($|[._-])/.test(normalized)
-    || /(^|[._-])(status|polling|callback|webhook|request|submit|queue|endpoint)($|[._-])/.test(normalized);
+  return /(^|[._-])(page|web|status|poll|callback|webhook|request|submit|queue|endpoint|response)[._-]?url($|[._-])/.test(normalized)
+    || /(^|[._-])url[._-]?(page|web|status|poll|callback|webhook|request|submit|queue|endpoint|response)($|[._-])/.test(normalized)
+    || /(^|[._-])(page|web|status|polling|callback|webhook|request|submit|queue|endpoint)($|[._-])/.test(normalized);
 }
 
 function isRelativeImageSource(value: string, key: string): boolean {
@@ -2411,8 +2462,8 @@ function isRemoteHttpImageSource(source: string): boolean {
 }
 
 function formatUnknownError(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  return String(error);
+  if (error instanceof Error) return redactSensitiveText(error.message);
+  return redactSensitiveText(String(error));
 }
 
 function asLightweightRetryResultSource(source: string): string | null {
@@ -2456,9 +2507,14 @@ async function materializeGeneratedImageSource(
     return prepared.imagePath;
   } catch (publicError) {
     const authHeaders = buildAuthenticatedImageFetchHeaders(cfg);
-    if (Object.keys(authHeaders).length === 0) {
+    const mayForwardCredentials = shouldForwardProviderCredentials(cfg.baseUrl, imageSource);
+    if (Object.keys(authHeaders).length === 0 || !mayForwardCredentials) {
       throw new Error(
-        `已获取到生成结果地址，但图片下载或解析失败：${formatUnknownError(publicError)}`
+        [
+          '已获取到生成结果地址，但图片下载或解析失败。',
+          `无鉴权下载：${formatUnknownError(publicError)}`,
+          !mayForwardCredentials ? '结果地址与服务商不同源，未转发 Authorization/Cookie 以避免凭据泄露。' : '',
+        ].filter(Boolean).join('\n')
       );
     }
 
@@ -2475,6 +2531,14 @@ async function materializeGeneratedImageSource(
       );
     }
   }
+}
+
+export async function materializeCustomProviderImageResult(
+  providerId: string,
+  imageSource: string,
+): Promise<string> {
+  const cfg = useCustomProvidersStore.getState().providers.find((provider) => provider.id === providerId);
+  return cfg ? materializeGeneratedImageSource(cfg, imageSource) : imageSource;
 }
 
 function isRemoteHttpSource(source: string): boolean {
@@ -3308,8 +3372,8 @@ async function sendVideoGenerationRequest(
     multipart: method === 'POST' ? multipart : undefined,
     timeoutMs: GENERATION_REQUEST_TIMEOUT_MS,
     networkErrorPrefix: GENERATION_SUBMIT_NETWORK_ERROR_PREFIX,
-    networkRetryAttempts: GENERATION_SUBMIT_NETWORK_RETRY_ATTEMPTS,
-    networkRetryDelayMs: GENERATION_SUBMIT_NETWORK_RETRY_DELAY_MS,
+    networkRetryAttempts: method === 'POST' ? VIDEO_SUBMIT_NETWORK_RETRY_ATTEMPTS : 2,
+    networkRetryDelayMs: VIDEO_SUBMIT_NETWORK_RETRY_DELAY_MS,
   });
   return parsed;
 }
@@ -3633,13 +3697,14 @@ async function sendGenerationRequest(
     method === 'GET' && body ? buildQueryParamsFromRequestBody(body) : undefined,
   );
   const headers = buildRequestHeaders(cfg, bodyMode, method);
+  const resolvedTimeoutMs = timeoutMs ?? resolveGenerationRequestTimeoutMs(cfg);
   logCustomProviderPhase('info', 'submit:request-built', {
     ...providerLogContext(cfg, model),
     method,
     bodyMode,
     url: maskDebugUrl(url),
     referenceImageCount: request.reference_images?.length ?? 0,
-    timeoutMs: timeoutMs ?? GENERATION_REQUEST_TIMEOUT_MS,
+    timeoutMs: resolvedTimeoutMs,
   });
   const { parsed } = await requestJson(url, {
     method,
@@ -3647,10 +3712,9 @@ async function sendGenerationRequest(
     bodyMode,
     body: method === 'POST' && (bodyMode === 'json' || bodyMode === 'form-urlencoded') ? body : undefined,
     multipart: method === 'POST' && bodyMode === 'multipart' ? multipart : undefined,
-    timeoutMs: timeoutMs ?? GENERATION_REQUEST_TIMEOUT_MS,
+    timeoutMs: resolvedTimeoutMs,
     networkErrorPrefix: GENERATION_SUBMIT_NETWORK_ERROR_PREFIX,
-    networkRetryAttempts: GENERATION_SUBMIT_NETWORK_RETRY_ATTEMPTS,
-    networkRetryDelayMs: GENERATION_SUBMIT_NETWORK_RETRY_DELAY_MS,
+    networkRetryAttempts: resolveGenerationSubmissionRetryAttempts(method),
   });
   return parsed;
 }

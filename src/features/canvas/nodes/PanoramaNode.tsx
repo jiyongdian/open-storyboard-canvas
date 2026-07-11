@@ -33,6 +33,7 @@ import { resolveImageModelResolution } from '@/features/canvas/models';
 import { imageUrlToDataUrl, reduceAspectRatio, resolveImageDisplayUrl } from '@/features/canvas/application/imageData';
 import { CURRENT_RUNTIME_SESSION_ID } from '@/features/canvas/application/generationErrorReport';
 import { appendGenerationParameterConstraints } from '@/features/canvas/application/generationPromptConstraints';
+import { normalizeImageRequestGeometry } from '@/features/canvas/application/imageRequestGeometry';
 import { showErrorDialog } from '@/features/canvas/application/errorDialog';
 import { persistImageSource } from '@/commands/image';
 
@@ -502,9 +503,19 @@ export const PanoramaNode = memo(({ id, data, selected }: PanoramaNodeProps) => 
     const generationStartedAt = Date.now();
     const generationDurationMs = 60000;
     const panoramaRequestRatio = selectPanoramaRequestRatio(resolved.supportedRatios, config.projection);
-    const sizeForGateway = resolved.builtinModel
+    const fallbackSizeForGateway = resolved.builtinModel
       ? resolveImageModelResolution(resolved.builtinModel, resolved.builtinModel.defaultResolution).value
       : '2K';
+    const requestGeometry = normalizeImageRequestGeometry({
+      selectedResolution:
+        resolved.extraParams.resolutionType
+        ?? resolved.extraParams.size
+        ?? fallbackSizeForGateway,
+      selectedAspectRatio: panoramaRequestRatio,
+      supportedAspectRatios: resolved.supportedRatios,
+      fallbackResolution: fallbackSizeForGateway,
+    });
+    const sizeForGateway = requestGeometry.requestSize;
 
     updateNodeData(id, {
       sourceMode: 'text',
@@ -532,17 +543,17 @@ export const PanoramaNode = memo(({ id, data, selected }: PanoramaNodeProps) => 
         : resolved.modelForGateway;
       const promptForRequest = appendGenerationParameterConstraints(prompt.trim(), {
         enabled: appendParameterConstraintsToPrompt,
-        aspectRatio: panoramaRequestRatio,
-        resolution: sizeForGateway,
+        aspectRatio: requestGeometry.promptAspectRatio,
+        resolution: requestGeometry.resolutionLabel,
         count: 1,
       });
       const jobId = await canvasAiGateway.submitGenerateImageJob({
         prompt: promptForRequest,
         model: requestModel,
         size: sizeForGateway,
-        aspectRatio: panoramaRequestRatio,
+        aspectRatio: requestGeometry.requestAspectRatio,
         referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
-        extraParams: { ...resolved.extraParams },
+        extraParams: { ...resolved.extraParams, resolutionType: requestGeometry.resolutionLabel },
       });
       updateNodeData(id, {
         generationJobId: jobId,

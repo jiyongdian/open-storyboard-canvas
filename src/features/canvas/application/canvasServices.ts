@@ -9,6 +9,7 @@ import {
   tauriAiGateway,
 } from '../infrastructure/tauriAiGateway';
 import { tauriImageSplitGateway } from '../infrastructure/tauriImageSplitGateway';
+import { materializeCustomProviderImageResult } from '../infrastructure/customProviderGateway';
 
 export const canvasEventBus = new InMemoryCanvasEventBus();
 export const canvasNodeFactory = new CanvasNodeFactory(uuidGenerator, nodeCatalog);
@@ -17,5 +18,6 @@ export const canvasAiGateway = tauriAiGateway;
 export const canvasVideoGateway = tauriAiGateway;
 export const buildImageGenerationDebugPreview = buildGenerateImageDebugPreview;
 export const buildVideoGenerationDebugPreview = buildGenerateVideoDebugPreview;
+export const materializeProviderAwareImageResult = materializeCustomProviderImageResult;
 
 export { graphImageResolver } from './graphImageResolver';

@@ -45,6 +45,7 @@ import {
   type GenerationDebugContext,
 } from '@/features/canvas/application/generationErrorReport';
 import { appendGenerationParameterConstraints } from '@/features/canvas/application/generationPromptConstraints';
+import { normalizeImageRequestGeometry } from '@/features/canvas/application/imageRequestGeometry';
 import {
   sanitizeStoryboardPromptText,
   sanitizeStoryboardText,
@@ -1076,6 +1077,15 @@ export const StoryboardGenNode = memo(({ id, data, selected, width, height }: St
       selectedResolution.value ??
       '2K'
     );
+    const requestGeometry = normalizeImageRequestGeometry({
+      selectedResolution: requestResolutionValue,
+      selectedAspectRatio: resolved.ratio,
+      referenceAspectRatio: resolvedRequestAspectRatio,
+      supportedAspectRatios: resolved.supportedRatios,
+      fallbackResolution: '2K',
+    });
+    const gatewayRequestAspectRatio = requestGeometry.requestAspectRatio;
+    const gatewayRequestSize = requestGeometry.requestSize;
     const generationDurationMs = 60000;
     const generationStartedAt = Date.now();
     const runtimeDiagnostics = await getRuntimeDiagnostics();
@@ -1098,8 +1108,8 @@ export const StoryboardGenNode = memo(({ id, data, selected, width, height }: St
         resultKind: 'storyboardGenOutput',
         prompt: '',
         model: resolved.modelForGateway,
-        size: requestResolutionValue as ImageSize,
-        requestAspectRatio: resolvedRequestAspectRatio,
+        size: gatewayRequestSize as ImageSize,
+        requestAspectRatio: gatewayRequestAspectRatio,
       }
     );
 
@@ -1130,27 +1140,33 @@ export const StoryboardGenNode = memo(({ id, data, selected, width, height }: St
 
       const promptForRequest = appendGenerationParameterConstraints(prompt, {
         enabled: appendParameterConstraintsToPrompt,
-        aspectRatio: resolvedRequestAspectRatio,
-        resolution: requestResolutionValue,
+        aspectRatio: requestGeometry.promptAspectRatio,
+        resolution: requestGeometry.resolutionLabel,
         count: 1,
       });
 
       const jobId = await canvasAiGateway.submitGenerateImageJob({
         prompt: promptForRequest,
         model: resolved.modelForGateway,
-        size: requestResolutionValue,
-        aspectRatio: resolvedRequestAspectRatio,
+        size: gatewayRequestSize,
+        aspectRatio: gatewayRequestAspectRatio,
         referenceImages: allReferenceImages,
-        extraParams: effectiveExtraParamsForRequest,
+        extraParams: {
+          ...effectiveExtraParamsForRequest,
+          resolutionType: requestGeometry.resolutionLabel,
+        },
       });
       const generationDebugContext: GenerationDebugContext = {
         sourceType: 'storyboardGen',
         providerId: resolved.providerId,
         requestModel: resolved.modelForGateway,
-        requestSize: requestResolutionValue,
-        requestAspectRatio: resolvedRequestAspectRatio,
+        requestSize: gatewayRequestSize,
+        requestAspectRatio: gatewayRequestAspectRatio,
         prompt: promptForRequest,
-        extraParams: effectiveExtraParamsForRequest,
+        extraParams: {
+          ...effectiveExtraParamsForRequest,
+          resolutionType: requestGeometry.resolutionLabel,
+        },
         referenceImageCount: allReferenceImages.length,
         referenceImagePlaceholders: createReferenceImagePlaceholders(allReferenceImages.length),
         appVersion: runtimeDiagnostics.appVersion,

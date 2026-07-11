@@ -21,6 +21,7 @@ import { showErrorDialog } from '@/features/canvas/application/errorDialog';
 import { canvasAiGateway } from '@/features/canvas/application/canvasServices';
 import { CURRENT_RUNTIME_SESSION_ID } from '@/features/canvas/application/generationErrorReport';
 import { appendGenerationParameterConstraints } from '@/features/canvas/application/generationPromptConstraints';
+import { normalizeImageRequestGeometry } from '@/features/canvas/application/imageRequestGeometry';
 import {
   getLocalDateStamp,
   resolveDefaultGeneratedImageDisplayName,
@@ -81,6 +82,23 @@ async function setNativeApiKeyIfNeeded(resolved: ResolvedPanelModel): Promise<vo
   if (resolved.builtinModel && resolved.apiKey) {
     await canvasAiGateway.setApiKey(resolved.providerId, resolved.apiKey);
   }
+}
+
+function resolvePanelImageGeometry(
+  resolved: ResolvedPanelModel,
+  referenceAspectRatio: string,
+  fallbackResolution: string,
+) {
+  return normalizeImageRequestGeometry({
+    selectedResolution:
+      resolved.extraParams.resolutionType
+      ?? resolved.extraParams.size
+      ?? fallbackResolution,
+    selectedAspectRatio: resolved.ratio,
+    referenceAspectRatio,
+    supportedAspectRatios: resolved.supportedRatios,
+    fallbackResolution,
+  });
 }
 
 export const SelectedNodeOverlay = memo(() => {
@@ -280,16 +298,20 @@ export const SelectedNodeOverlay = memo(() => {
 
     // Compute size + resolveRequest for built-in models; custom / dreamina
     // entries bypass those and use the panel-selected ratio directly.
-    const sizeForGateway = resolved.builtinModel
+    const fallbackSizeForGateway = resolved.builtinModel
       ? resolveImageModelResolution(resolved.builtinModel, resolved.builtinModel.defaultResolution).value
       : '2K';
+    const geometry = resolvePanelImageGeometry(
+      resolved,
+      selectedNodeImageData.aspectRatio,
+      fallbackSizeForGateway,
+    );
+    const sizeForGateway = geometry.requestSize;
     const generationDurationMs = resolved.builtinModel?.expectedDurationMs ?? 60000;
     const requestModel = resolved.builtinModel
       ? resolved.builtinModel.resolveRequest({ referenceImageCount: 1 }).requestModel
       : resolved.modelForGateway;
-    const ratioForGateway = resolved.ratio === 'auto'
-      ? selectedNodeImageData.aspectRatio
-      : resolved.ratio;
+    const ratioForGateway = geometry.requestAspectRatio;
 
     const generationStartedAt = Date.now();
     const promptSource = prompt.trim();
@@ -311,8 +333,8 @@ export const SelectedNodeOverlay = memo(() => {
     try {
       const promptForRequest = appendGenerationParameterConstraints(prompt.trim(), {
         enabled: appendParameterConstraintsToPrompt,
-        aspectRatio: ratioForGateway,
-        resolution: sizeForGateway,
+        aspectRatio: geometry.promptAspectRatio,
+        resolution: geometry.resolutionLabel,
         count: 1,
       });
       const jobId = await canvasAiGateway.submitGenerateImageJob({
@@ -321,7 +343,7 @@ export const SelectedNodeOverlay = memo(() => {
         size: sizeForGateway,
         aspectRatio: ratioForGateway,
         referenceImages: [selectedNodeImageData.rawReferenceImage],
-        extraParams: { ...resolved.extraParams },
+        extraParams: { ...resolved.extraParams, resolutionType: geometry.resolutionLabel },
       });
       updateNodeData(newNodeId, {
         generationJobId: jobId,
@@ -411,12 +433,16 @@ export const SelectedNodeOverlay = memo(() => {
     try {
     await setNativeApiKeyIfNeeded(resolved);
 
-    const ratioForGateway = resolved.ratio === 'auto'
-      ? selectedNodeImageData.aspectRatio
-      : resolved.ratio;
-    const sizeForGateway = resolved.builtinModel
+    const fallbackSizeForGateway = resolved.builtinModel
       ? resolveImageModelResolution(resolved.builtinModel, resolved.builtinModel.defaultResolution).value
       : '2K';
+    const geometry = resolvePanelImageGeometry(
+      resolved,
+      selectedNodeImageData.aspectRatio,
+      fallbackSizeForGateway,
+    );
+    const ratioForGateway = geometry.requestAspectRatio;
+    const sizeForGateway = geometry.requestSize;
     const generationDurationMs = resolved.builtinModel?.expectedDurationMs ?? 60000;
     const generationStartedAt = Date.now();
     const newNodePosition = findNodePosition(
@@ -441,8 +467,8 @@ export const SelectedNodeOverlay = memo(() => {
         : resolved.modelForGateway;
       const promptForRequest = appendGenerationParameterConstraints(prompt, {
         enabled: appendParameterConstraintsToPrompt,
-        aspectRatio: ratioForGateway,
-        resolution: sizeForGateway,
+        aspectRatio: geometry.promptAspectRatio,
+        resolution: geometry.resolutionLabel,
         count: 1,
       });
       const jobId = await canvasAiGateway.submitGenerateImageJob({
@@ -451,7 +477,7 @@ export const SelectedNodeOverlay = memo(() => {
         size: sizeForGateway,
         aspectRatio: ratioForGateway,
         referenceImages: [selectedNodeImageData.rawReferenceImage],
-        extraParams: { ...resolved.extraParams },
+        extraParams: { ...resolved.extraParams, resolutionType: geometry.resolutionLabel },
       });
       updateNodeData(newNodeId, {
         generationJobId: jobId,
@@ -569,10 +595,20 @@ export const SelectedNodeOverlay = memo(() => {
     }
 
     await setNativeApiKeyIfNeeded(resolved);
-    const sizeForGateway = resolved.builtinModel
+    const fallbackSizeForGateway = resolved.builtinModel
       ? resolveImageModelResolution(resolved.builtinModel, resolved.builtinModel.defaultResolution).value
       : '2K';
     const panoramaRequestRatio = selectPanoramaRequestRatio(resolved.supportedRatios, config.projection);
+    const geometry = normalizeImageRequestGeometry({
+      selectedResolution:
+        resolved.extraParams.resolutionType
+        ?? resolved.extraParams.size
+        ?? fallbackSizeForGateway,
+      selectedAspectRatio: panoramaRequestRatio,
+      supportedAspectRatios: resolved.supportedRatios,
+      fallbackResolution: fallbackSizeForGateway,
+    });
+    const sizeForGateway = geometry.requestSize;
     const generationDurationMs = resolved.builtinModel?.expectedDurationMs ?? 60000;
     const generationStartedAt = Date.now();
 
@@ -610,17 +646,17 @@ export const SelectedNodeOverlay = memo(() => {
         : resolved.modelForGateway;
       const promptForRequest = appendGenerationParameterConstraints(prompt.trim(), {
         enabled: appendParameterConstraintsToPrompt,
-        aspectRatio: panoramaRequestRatio,
-        resolution: sizeForGateway,
+        aspectRatio: geometry.promptAspectRatio,
+        resolution: geometry.resolutionLabel,
         count: 1,
       });
       const jobId = await canvasAiGateway.submitGenerateImageJob({
         prompt: promptForRequest,
         model: requestModel,
         size: sizeForGateway,
-        aspectRatio: panoramaRequestRatio,
+        aspectRatio: geometry.requestAspectRatio,
         referenceImages: referenceImages.length > 0 ? referenceImages : undefined,
-        extraParams: { ...resolved.extraParams },
+        extraParams: { ...resolved.extraParams, resolutionType: geometry.resolutionLabel },
       });
       updateNodeData(newNodeId, {
         generationJobId: jobId,
@@ -692,9 +728,15 @@ export const SelectedNodeOverlay = memo(() => {
       return;
     }
     await setNativeApiKeyIfNeeded(resolved);
-    const sizeForGateway = resolved.builtinModel
+    const fallbackSizeForGateway = resolved.builtinModel
       ? resolveImageModelResolution(resolved.builtinModel, resolved.builtinModel.defaultResolution).value
       : '2K';
+    const geometry = resolvePanelImageGeometry(
+      resolved,
+      selectedNodeImageData.aspectRatio,
+      fallbackSizeForGateway,
+    );
+    const sizeForGateway = geometry.requestSize;
     const generationDurationMs = resolved.builtinModel?.expectedDurationMs ?? 60000;
     const generationStartedAt = Date.now();
     const newNodePosition = findNodePosition(selectedNode.id, EXPORT_RESULT_NODE_DEFAULT_WIDTH, EXPORT_RESULT_NODE_LAYOUT_HEIGHT);
@@ -725,13 +767,11 @@ export const SelectedNodeOverlay = memo(() => {
       const requestModel = resolved.builtinModel
         ? resolved.builtinModel.resolveRequest({ referenceImageCount: dedupedReferenceImages.length }).requestModel
         : resolved.modelForGateway;
-      const ratioForGateway = resolved.ratio === 'auto'
-        ? selectedNodeImageData.aspectRatio
-        : resolved.ratio;
+      const ratioForGateway = geometry.requestAspectRatio;
       const promptForRequest = appendGenerationParameterConstraints(prompt.trim(), {
         enabled: appendParameterConstraintsToPrompt,
-        aspectRatio: ratioForGateway,
-        resolution: sizeForGateway,
+        aspectRatio: geometry.promptAspectRatio,
+        resolution: geometry.resolutionLabel,
         count: 1,
       });
       const jobId = await canvasAiGateway.submitGenerateImageJob({
@@ -740,7 +780,7 @@ export const SelectedNodeOverlay = memo(() => {
         size: sizeForGateway,
         aspectRatio: ratioForGateway,
         referenceImages: dedupedReferenceImages.length > 0 ? dedupedReferenceImages : undefined,
-        extraParams: { ...resolved.extraParams },
+        extraParams: { ...resolved.extraParams, resolutionType: geometry.resolutionLabel },
       });
       updateNodeData(newNodeId, {
         generationJobId: jobId,
