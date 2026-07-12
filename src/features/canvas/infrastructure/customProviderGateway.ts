@@ -98,6 +98,14 @@ const RESULT_POLL_RETRY_HTTP_STATUSES = [408, 425, 429, 500, 502, 503, 504, 520,
 const DEFAULT_OPENAI_VIDEO_ENDPOINT_PATH = '/v1/videos';
 const DEFAULT_ANTHROPIC_CHAT_MAX_TOKENS = 8192;
 const DEFAULT_AGNES_CHAT_MAX_COMPLETION_TOKENS = 65500;
+const IMAGE_EDIT_COMPATIBILITY_STORAGE_KEY = 'custom-provider-image-edit-compatibility:v1';
+
+type ImageEditCompatibilityProfileId = 'configured' | 'openai-array' | 'legacy-minimal';
+
+interface ImageEditCompatibilityAttempt {
+  profileId: ImageEditCompatibilityProfileId;
+  reason: 'initial' | 'same-profile-retry' | 'alternate-profile';
+}
 
 export interface CustomProviderRequestDebugPreview {
   providerLabel: string;
@@ -1518,9 +1526,15 @@ function buildMultipartBody(
   cfg: CustomProviderConfig,
   modelName: string,
   request: GenerateRequest,
+  options: {
+    fileField?: string;
+    minimal?: boolean;
+    singleFile?: boolean;
+  } = {},
 ): CustomHttpMultipartBody {
   const referenceImages = request.reference_images ?? [];
-  const fileField = resolveCustomProviderMultipartFileField(cfg);
+  const configuredFileField = resolveCustomProviderMultipartFileField(cfg);
+  const fileField = options.fileField?.trim() || configuredFileField;
   if (referenceImages.length === 0 && requiresMultipartReferenceImage(cfg)) {
     throw new Error(
       `该配置需要 multipart/form-data 文件字段 "${fileField}"，但当前请求没有参考图。请从已有图片节点发起编辑，或改用不要求 image/file 的生图接口。`
@@ -1541,8 +1555,21 @@ function buildMultipartBody(
   const hintedReferenceField = typeof hints?.referenceImageField === 'string'
     ? hints.referenceImageField.trim()
     : '';
+  if (options.minimal) {
+    const canonicalBody = ensureOpenAiImageModelBinding(cfg, record, modelName);
+    const fields: NonNullable<CustomHttpMultipartBody['fields']> = [];
+    ['model', 'prompt', 'size', 'n'].forEach((fieldName) => {
+      appendMultipartField(fields, fieldName, canonicalBody[fieldName]);
+    });
+    const selectedImages = options.singleFile ? referenceImages.slice(0, 1) : referenceImages;
+    return {
+      fields,
+      files: selectedImages.map((imageSource, index) => buildMultipartFile(fileField, imageSource, index)),
+    };
+  }
   const skipPaths = new Set<string>([
     'reference_images',
+    configuredFileField,
     fileField,
     hintedReferenceField,
     'image',
@@ -1551,11 +1578,60 @@ function buildMultipartBody(
   const fields: NonNullable<CustomHttpMultipartBody['fields']> = [];
   collectMultipartFields(hintedBody, '', skipPaths, fields);
 
-  const files = referenceImages.map((imageSource, index) =>
+  const selectedImages = options.singleFile ? referenceImages.slice(0, 1) : referenceImages;
+  const files = selectedImages.map((imageSource, index) =>
     buildMultipartFile(fileField, imageSource, index)
   );
 
   return { fields, files };
+}
+
+function buildImageEditCompatibilityMultipart(
+  cfg: CustomProviderConfig,
+  modelName: string,
+  request: GenerateRequest,
+  profileId: ImageEditCompatibilityProfileId,
+): CustomHttpMultipartBody {
+  if (profileId === 'openai-array') {
+    return buildMultipartBody(cfg, modelName, request, { fileField: 'image[]' });
+  }
+  if (profileId === 'legacy-minimal') {
+    return buildMultipartBody(cfg, modelName, request, {
+      fileField: 'image',
+      minimal: true,
+      singleFile: true,
+    });
+  }
+  return buildMultipartBody(cfg, modelName, request);
+}
+
+function multipartWireSignature(multipart: CustomHttpMultipartBody): string {
+  const fieldNames = (multipart.fields ?? []).map((field) => field.name).sort();
+  const fileNames = (multipart.files ?? []).map((file) => file.name);
+  return JSON.stringify({ fieldNames, fileNames });
+}
+
+function selectAlternateImageEditProfile(
+  cfg: CustomProviderConfig,
+  modelName: string,
+  request: GenerateRequest,
+  currentProfileId: ImageEditCompatibilityProfileId,
+  currentMultipart: CustomHttpMultipartBody,
+): ImageEditCompatibilityProfileId | null {
+  const currentSignature = multipartWireSignature(currentMultipart);
+  const candidates: ImageEditCompatibilityProfileId[] = [
+    'configured',
+    'openai-array',
+    'legacy-minimal',
+  ];
+  for (const candidate of candidates) {
+    if (candidate === currentProfileId) continue;
+    const candidateMultipart = buildImageEditCompatibilityMultipart(cfg, modelName, request, candidate);
+    if (multipartWireSignature(candidateMultipart) !== currentSignature) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 function resolveModernProviderBodyMode(
@@ -3672,6 +3748,171 @@ async function retryCustomVideoPoll(jobId: string, retryContext: VideoPollRetryC
   }
 }
 
+function isRecognizedImageEditValidationError(error: unknown): error is HttpStatusError {
+  if (!(error instanceof HttpStatusError) || error.status !== 400) return false;
+  const message = error.message;
+  return isEmptyModelValidationError(error)
+    || /(?:missing|required|not specified|cannot be empty|must provide)\b[^\n]{0,100}\b(?:image|file)\b/i.test(message)
+    || /\b(?:image|file)\b[^\n]{0,100}\b(?:missing|required|not specified|cannot be empty)\b/i.test(message)
+    || /(?:request|request body|body|payload|form)[^\n]{0,100}(?:content-type|multipart\/form-data|form-data)[^\n]{0,100}(?:missing|required|expected|must be|invalid|unsupported|not supported|incorrect|wrong)/i.test(message)
+    || /(?:content-type|multipart\/form-data|form-data)[^\n]{0,100}(?:missing|required|expected|must be|invalid|unsupported|not supported|incorrect|wrong)[^\n]{0,100}(?:request|request body|body|payload|form|multipart)/i.test(message)
+    || /(?:failed|unable|cannot|could not)[^\n]{0,40}(?:parse|decode|read)[^\n]{0,60}(?:multipart|form-data|request body|form)/i.test(message)
+    || /(?:multipart|form-data)[^\n]{0,60}(?:boundary)[^\n]{0,60}(?:missing|required|not found|invalid)/i.test(message)
+    || /\b(?:unknown|unsupported|unrecognized|unexpected|invalid)\b[^\n]{0,60}\b(?:parameter|param|field)\b/i.test(message)
+    || /(?:缺少|未提供|必填|不能为空)[^\n]{0,60}(?:图片|图像|文件)/i.test(message)
+    || /(?:不支持|未知|无效)[^\n]{0,60}(?:参数|字段)/i.test(message);
+}
+
+function isEmptyModelValidationError(error: unknown): error is HttpStatusError {
+  if (!(error instanceof HttpStatusError) || error.status !== 400) return false;
+  const message = error.message;
+  return /\bmodel(?:\s+name)?\b[^\n]{0,100}\b(?:not specified|cannot be empty|must not be empty|is required|missing|empty)\b/i.test(message)
+    || /\b(?:not specified|missing|empty)\b[^\n]{0,100}\bmodel(?:\s+name)?\b/i.test(message)
+    || /(?:未指定|缺少)[^\n]{0,40}模型|模型[^\n]{0,40}(?:为空|不能为空|必填)/i.test(message);
+}
+
+function stableSerialize(value: unknown): string {
+  if (value === null || value === undefined) return String(value);
+  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`;
+  if (typeof value === 'object') {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableSerialize(item)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function hashCompatibilityValue(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function sanitizeCompatibilityFingerprintValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitizeCompatibilityFingerprintValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+    key,
+    /(?:api[-_]?key|authorization|password|secret|signature|token)/i.test(key)
+      ? '[sensitive]'
+      : sanitizeCompatibilityFingerprintValue(item),
+  ]));
+}
+
+function normalizeCompatibilityEndpoint(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname.replace(/\/+$/, '')}`;
+  } catch {
+    return url.split(/[?#]/, 1)[0].replace(/\/+$/, '');
+  }
+}
+
+function imageEditCompatibilityLookupKey(
+  cfg: CustomProviderConfig,
+  modelName: string,
+  endpointUrl: string,
+): string {
+  const extraParams = asPlainRecord(cfg.extraParams);
+  const multipart = asPlainRecord(extraParams?.multipart);
+  const hints = asPlainRecord(extraParams?.requestBodyHints);
+  const configFingerprint = hashCompatibilityValue(stableSerialize({
+    providerConfigVersion: extraParams?.providerConfigVersion ?? null,
+    providerKind: extraParams?.providerKind ?? null,
+    requestBodyMode: extraParams?.requestBodyMode ?? null,
+    multipart: {
+      enabled: multipart?.enabled ?? null,
+      fileField: multipart?.fileField ?? null,
+    },
+    requestBodyHints: hints ?? null,
+    defaultRequestParams: sanitizeCompatibilityFingerprintValue(resolveDefaultRequestParams(cfg)),
+    queryParams: sanitizeCompatibilityFingerprintValue(cfg.queryParams ?? {}),
+  }));
+  return hashCompatibilityValue(stableSerialize({
+    providerId: cfg.id,
+    baseUrl: normalizeProviderBaseUrl(cfg.baseUrl),
+    endpoint: normalizeCompatibilityEndpoint(endpointUrl),
+    modelFamily: modelName.trim().toLowerCase(),
+    configFingerprint,
+  }));
+}
+
+function readLearnedImageEditProfiles(): Record<string, ImageEditCompatibilityProfileId> {
+  try {
+    const raw = globalThis.localStorage?.getItem(IMAGE_EDIT_COMPATIBILITY_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as { version?: unknown; profiles?: unknown };
+    if (parsed.version !== 1 || !parsed.profiles || typeof parsed.profiles !== 'object' || Array.isArray(parsed.profiles)) {
+      return {};
+    }
+    return Object.fromEntries(Object.entries(parsed.profiles as Record<string, unknown>).filter(
+      (entry): entry is [string, ImageEditCompatibilityProfileId] =>
+        entry[1] === 'configured' || entry[1] === 'openai-array' || entry[1] === 'legacy-minimal'
+    ));
+  } catch {
+    return {};
+  }
+}
+
+function writeLearnedImageEditProfile(
+  lookupKey: string,
+  profileId: ImageEditCompatibilityProfileId,
+): void {
+  try {
+    const profiles = readLearnedImageEditProfiles();
+    profiles[lookupKey] = profileId;
+    globalThis.localStorage?.setItem(IMAGE_EDIT_COMPATIBILITY_STORAGE_KEY, JSON.stringify({
+      version: 1,
+      profiles,
+    }));
+  } catch {
+    // Compatibility learning is best-effort and must never block generation.
+  }
+}
+
+function formatImageEditCompatibilityAttempts(attempts: ImageEditCompatibilityAttempt[]): string {
+  return attempts.map((attempt) => attempt.reason === 'same-profile-retry'
+    ? `${attempt.profileId}(同格式重试)`
+    : attempt.profileId).join(' -> ');
+}
+
+function appendCompatibilityAttemptsToError(
+  error: unknown,
+  attempts: ImageEditCompatibilityAttempt[],
+): Error {
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const message = `${rawMessage}\n图生图兼容协商已尝试：${formatImageEditCompatibilityAttempts(attempts)}`;
+  if (error instanceof HttpStatusError) return new HttpStatusError(message, error.status);
+  if (error instanceof NetworkRequestError) return new NetworkRequestError(message);
+  return new Error(message);
+}
+
+function isImageEditCompatibilityEligible(
+  cfg: CustomProviderConfig,
+  method: 'GET' | 'POST',
+  bodyMode: CustomProviderBodyMode,
+  endpointUrl: string,
+  request: GenerateRequest,
+): boolean {
+  if (
+    cfg.apiStyle !== 'openai-compatible'
+    || method !== 'POST'
+    || bodyMode !== 'multipart'
+    || (request.reference_images?.length ?? 0) === 0
+  ) {
+    return false;
+  }
+  try {
+    return /\/images\/edits(?:\/|$)/i.test(new URL(endpointUrl).pathname);
+  } catch {
+    return /\/images\/edits(?:\/|$)/i.test(endpointUrl.split(/[?#]/, 1)[0]);
+  }
+}
+
 async function sendGenerationRequest(
   cfg: CustomProviderConfig,
   model: string,
@@ -3689,7 +3930,6 @@ async function sendGenerationRequest(
   const body = bodyMode === 'json' || bodyMode === 'form-urlencoded'
     ? buildRequestBody(cfg, model, request)
     : undefined;
-  const multipart = bodyMode === 'multipart' ? buildMultipartBody(cfg, model, request) : undefined;
   const url = resolveEndpointUrlForRequest(
     cfg,
     model,
@@ -3698,25 +3938,111 @@ async function sendGenerationRequest(
   );
   const headers = buildRequestHeaders(cfg, bodyMode, method);
   const resolvedTimeoutMs = timeoutMs ?? resolveGenerationRequestTimeoutMs(cfg);
-  logCustomProviderPhase('info', 'submit:request-built', {
-    ...providerLogContext(cfg, model),
-    method,
-    bodyMode,
-    url: maskDebugUrl(url),
-    referenceImageCount: request.reference_images?.length ?? 0,
-    timeoutMs: resolvedTimeoutMs,
-  });
-  const { parsed } = await requestJson(url, {
-    method,
-    headers,
-    bodyMode,
-    body: method === 'POST' && (bodyMode === 'json' || bodyMode === 'form-urlencoded') ? body : undefined,
-    multipart: method === 'POST' && bodyMode === 'multipart' ? multipart : undefined,
-    timeoutMs: resolvedTimeoutMs,
-    networkErrorPrefix: GENERATION_SUBMIT_NETWORK_ERROR_PREFIX,
-    networkRetryAttempts: resolveGenerationSubmissionRetryAttempts(method),
-  });
-  return parsed;
+  const submit = async (
+    multipart?: CustomHttpMultipartBody,
+    compatibilityAttempt?: ImageEditCompatibilityAttempt,
+  ): Promise<unknown> => {
+    if (compatibilityAttempt) {
+      logCustomProviderPhase('info', 'submit:compatibility-attempt', {
+        ...providerLogContext(cfg, model),
+        profileId: compatibilityAttempt.profileId,
+        reason: compatibilityAttempt.reason,
+        fileFields: (multipart?.files ?? []).map((file) => file.name),
+        textFields: (multipart?.fields ?? []).map((field) => field.name),
+      });
+    }
+    logCustomProviderPhase('info', 'submit:request-built', {
+      ...providerLogContext(cfg, model),
+      method,
+      bodyMode,
+      url: maskDebugUrl(url),
+      compatibilityProfile: compatibilityAttempt?.profileId,
+      referenceImageCount: request.reference_images?.length ?? 0,
+      timeoutMs: resolvedTimeoutMs,
+    });
+    const { parsed } = await requestJson(url, {
+      method,
+      headers,
+      bodyMode,
+      body: method === 'POST' && (bodyMode === 'json' || bodyMode === 'form-urlencoded') ? body : undefined,
+      multipart: method === 'POST' && bodyMode === 'multipart' ? multipart : undefined,
+      timeoutMs: resolvedTimeoutMs,
+      networkErrorPrefix: GENERATION_SUBMIT_NETWORK_ERROR_PREFIX,
+      networkRetryAttempts: resolveGenerationSubmissionRetryAttempts(method),
+    });
+    return parsed;
+  };
+
+  if (!isImageEditCompatibilityEligible(cfg, method, bodyMode, url, request)) {
+    const multipart = bodyMode === 'multipart' ? buildMultipartBody(cfg, model, request) : undefined;
+    return submit(multipart);
+  }
+
+  const lookupKey = imageEditCompatibilityLookupKey(cfg, model, url);
+  const learnedProfile = readLearnedImageEditProfiles()[lookupKey];
+  const initialProfile: ImageEditCompatibilityProfileId = learnedProfile ?? 'configured';
+  const initialMultipart = buildImageEditCompatibilityMultipart(cfg, model, request, initialProfile);
+  const attempts: ImageEditCompatibilityAttempt[] = [];
+  const attemptProfile = async (
+    profileId: ImageEditCompatibilityProfileId,
+    reason: ImageEditCompatibilityAttempt['reason'],
+    multipart: CustomHttpMultipartBody,
+  ): Promise<unknown> => {
+    const attempt = { profileId, reason } satisfies ImageEditCompatibilityAttempt;
+    attempts.push(attempt);
+    return submit(multipart, attempt);
+  };
+
+  let validationError: unknown;
+  try {
+    return await attemptProfile(initialProfile, 'initial', initialMultipart);
+  } catch (error) {
+    validationError = error;
+  }
+
+  if (!isRecognizedImageEditValidationError(validationError)) {
+    throw appendCompatibilityAttemptsToError(validationError, attempts);
+  }
+
+  if (isEmptyModelValidationError(validationError)) {
+    try {
+      return await attemptProfile(initialProfile, 'same-profile-retry', initialMultipart);
+    } catch (error) {
+      validationError = error;
+    }
+    if (!isRecognizedImageEditValidationError(validationError)) {
+      throw appendCompatibilityAttemptsToError(validationError, attempts);
+    }
+  }
+
+  const alternateProfile = selectAlternateImageEditProfile(
+    cfg,
+    model,
+    request,
+    initialProfile,
+    initialMultipart,
+  );
+  if (!alternateProfile) {
+    throw appendCompatibilityAttemptsToError(validationError, attempts);
+  }
+
+  const alternateMultipart = buildImageEditCompatibilityMultipart(cfg, model, request, alternateProfile);
+  try {
+    const parsed = await attemptProfile(alternateProfile, 'alternate-profile', alternateMultipart);
+    // Some compatible gateways report application-level failures in an HTTP 200 body.
+    // Do not learn a profile until the same success-code validation used by the
+    // production response flow accepts the payload.
+    unwrapProviderPayload(parsed);
+    writeLearnedImageEditProfile(lookupKey, alternateProfile);
+    logCustomProviderPhase('info', 'submit:compatibility-learned', {
+      ...providerLogContext(cfg, model),
+      profileId: alternateProfile,
+      attemptCount: attempts.length,
+    });
+    return parsed;
+  } catch (error) {
+    throw appendCompatibilityAttemptsToError(error, attempts);
+  }
 }
 
 function unwrapProviderPayload(payload: unknown): unknown {
